@@ -1084,5 +1084,8 @@ async def seed_demo() -> dict[str, Any]:
     return {"ok": True, "race_id": "TRC8H", "team_codes": created_codes, "race_control_token": admin_token}
 
 
+if (WEB_DIST_DIR / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=WEB_DIST_DIR / "assets"), name="assets")
+
 if WEB_DIST_DIR.exists():
     app.mount("/", StaticFiles(directory=WEB_DIST_DIR, html=True), name="web")

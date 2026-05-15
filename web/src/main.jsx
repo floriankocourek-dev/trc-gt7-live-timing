@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE || (import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin);
 const WS_BASE = API_BASE.replace(/^http/, 'ws');
 
 function formatMs(value) {
