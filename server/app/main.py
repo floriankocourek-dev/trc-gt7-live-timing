@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -1088,4 +1089,15 @@ if (WEB_DIST_DIR / "assets").exists():
     app.mount("/assets", StaticFiles(directory=WEB_DIST_DIR / "assets"), name="assets")
 
 if WEB_DIST_DIR.exists():
-    app.mount("/", StaticFiles(directory=WEB_DIST_DIR, html=True), name="web")
+    @app.get("/")
+    def web_index() -> FileResponse:
+        return FileResponse(WEB_DIST_DIR / "index.html")
+
+    @app.get("/{full_path:path}")
+    def web_fallback(full_path: str) -> FileResponse:
+        if full_path.startswith(("api/", "ws/", "assets/")):
+            raise HTTPException(status_code=404, detail="Not Found")
+        candidate = (WEB_DIST_DIR / full_path).resolve()
+        if candidate.is_file() and WEB_DIST_DIR.resolve() in candidate.parents:
+            return FileResponse(candidate)
+        return FileResponse(WEB_DIST_DIR / "index.html")
