@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: trc-gt7-live-timing
+    env: docker
+    plan: starter
+    autoDeployTrigger: commit
+    healthCheckPath: /api/health
+    disk:
+      name: trc-live-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: TRC_SECRET
+        generateValue: true
+      - key: TRC_RACE_CONTROL_PASSWORD
+        sync: false
+      - key: TRC_ALLOWED_ORIGINS
+        value: "*"

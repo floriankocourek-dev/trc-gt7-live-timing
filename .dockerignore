@@ -1,0 +1,13 @@
+.git
+**/.venv
+**/__pycache__
+**/*.pyc
+**/*.log
+**/*.sqlite3
+**/*.db
+web/node_modules
+web/dist
+collector/build
+collector/dist
+collector/.venv
+server/.venv
