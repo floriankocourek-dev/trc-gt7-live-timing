@@ -4,7 +4,7 @@ import json
 import queue
 import threading
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, Button, Checkbutton, Entry, Frame, IntVar, Label, StringVar, Tk, messagebox
+from tkinter import BOTH, END, Button, Checkbutton, Entry, Frame, IntVar, Label, StringVar, Tk, messagebox
 from tkinter.ttk import Combobox
 
 from collector import CollectorClient, fetch_collector_entries
@@ -12,6 +12,7 @@ from telemetry_sources import GT7TelemetrySource, MockTelemetrySource
 
 
 CONFIG_PATH = Path.home() / "Documents" / "TRC GT7 Collector" / "collector_config.json"
+LIVE_SERVER_URL = "https://trc-gt7-live-timing.onrender.com"
 
 
 def load_config() -> dict:
@@ -32,11 +33,14 @@ class CollectorApp:
     def __init__(self, root: Tk, default_server: str) -> None:
         self.root = root
         self.root.title("TRC GT7 Collector")
-        self.root.geometry("720x560")
-        self.root.minsize(620, 500)
+        self.root.geometry("760x560")
+        self.root.minsize(680, 520)
 
         config = load_config()
-        self.server_url = StringVar(value=config.get("server_url", default_server))
+        saved_server = config.get("server_url", default_server)
+        if saved_server == "http://localhost:8000":
+            saved_server = default_server
+        self.server_url = StringVar(value=saved_server)
         self.race_code = StringVar(value=config.get("race_code", "TRC8H"))
         self.team_code = StringVar(value="")
         self.ps5_ip = StringVar(value=config.get("ps5_ip", ""))
@@ -67,28 +71,26 @@ class CollectorApp:
             fg="#555555",
         ).pack(anchor="w", pady=(0, 14))
 
-        self.row(outer, "Server", Entry(outer, textvariable=self.server_url))
+        form = Frame(outer)
+        form.pack(fill="x", pady=(0, 8))
+        form.columnconfigure(1, weight=1)
 
-        race_row = Frame(outer)
-        race_row.pack(fill="x", pady=5)
-        Label(race_row, text="Race Code", width=16, anchor="w").pack(side=LEFT)
-        Entry(race_row, textvariable=self.race_code).pack(side=LEFT, fill="x", expand=True)
-        Button(race_row, text="Connect", command=self.load_entries).pack(side=RIGHT, padx=(8, 0))
+        self.row(form, 0, "Server", Entry(form, textvariable=self.server_url))
+        self.row(form, 1, "Race Code", Entry(form, textvariable=self.race_code), Button(form, text="Connect", command=self.load_entries))
 
-        self.team_box = Combobox(outer, textvariable=self.selected_entry, state="readonly")
-        self.row(outer, "Team / Car", self.team_box)
+        self.team_box = Combobox(form, textvariable=self.selected_entry, state="readonly")
+        self.row(form, 2, "Team / Car", self.team_box)
         self.team_box.bind("<<ComboboxSelected>>", lambda _event: self.update_drivers())
 
-        self.driver_box = Combobox(outer, textvariable=self.selected_driver, state="readonly")
-        self.row(outer, "Current Driver", self.driver_box)
+        self.driver_box = Combobox(form, textvariable=self.selected_driver, state="readonly")
+        self.row(form, 3, "Current Driver", self.driver_box)
 
-        self.row(outer, "Team PIN", Entry(outer, textvariable=self.team_code, show="*"))
-        self.row(outer, "PlayStation IP", Entry(outer, textvariable=self.ps5_ip))
+        self.row(form, 4, "Team PIN", Entry(form, textvariable=self.team_code, show="*"))
+        self.row(form, 5, "PlayStation IP", Entry(form, textvariable=self.ps5_ip))
 
         mock_row = Frame(outer)
         mock_row.pack(fill="x", pady=6)
-        Label(mock_row, text="", width=16).pack(side=LEFT)
-        Checkbutton(mock_row, text="Use mock telemetry for testing", variable=self.use_mock).pack(side=LEFT)
+        Checkbutton(mock_row, text="Use mock telemetry for testing", variable=self.use_mock).pack(anchor="w", padx=(128, 0))
 
         status = Frame(outer, pady=10)
         status.pack(fill="x")
@@ -100,8 +102,8 @@ class CollectorApp:
 
         buttons = Frame(outer)
         buttons.pack(fill="x", pady=10)
-        Button(buttons, text="Start Sending", command=self.start).pack(side=LEFT)
-        Button(buttons, text="Stop", command=self.stop).pack(side=LEFT, padx=8)
+        Button(buttons, text="Start Sending", command=self.start).pack(side="left")
+        Button(buttons, text="Stop", command=self.stop).pack(side="left", padx=8)
 
         self.log = Entry(outer, state="readonly")
         self.log.pack(fill="x", pady=(10, 0))
@@ -116,11 +118,11 @@ class CollectorApp:
             fg="#555555",
         ).pack(anchor="w", pady=(16, 0))
 
-    def row(self, parent: Frame, label: str, widget) -> None:
-        frame = Frame(parent)
-        frame.pack(fill="x", pady=5)
-        Label(frame, text=label, width=16, anchor="w").pack(side=LEFT)
-        widget.pack(side=LEFT, fill="x", expand=True)
+    def row(self, parent: Frame, row: int, label: str, widget, trailing=None) -> None:
+        Label(parent, text=label, width=16, anchor="w").grid(row=row, column=0, sticky="w", pady=5)
+        widget.grid(row=row, column=1, sticky="ew", pady=5)
+        if trailing:
+            trailing.grid(row=row, column=2, sticky="e", padx=(8, 0), pady=5)
 
     def status_line(self, parent: Frame, row: int, label: str, value: StringVar) -> None:
         Label(parent, text=f"{label}:", width=18, anchor="w").grid(row=row, column=0, sticky="w")
@@ -262,8 +264,7 @@ class CollectorApp:
         return f"#{entry['car_number']} - {entry['team_name']} - {entry['car_model']}"
 
 
-def run_gui(default_server: str = "http://localhost:8000") -> None:
+def run_gui(default_server: str = LIVE_SERVER_URL) -> None:
     root = Tk()
     CollectorApp(root, default_server)
     root.mainloop()
-

@@ -11,6 +11,8 @@ from gt7_protocol import GT7TelemetryError
 from telemetry_sources import GT7TelemetrySource, MockTelemetrySource, TelemetrySource
 
 
+LIVE_SERVER_URL = "https://trc-gt7-live-timing.onrender.com"
+
 FRIENDLY_ERRORS = {
     401: "Team code is incorrect. Please check the code provided by Race Control.",
     404: "Race or team was not found. Please check the race code and selected team.",
@@ -135,7 +137,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TRC GT7 Collector")
     parser.add_argument("--gui", action="store_true", help="Open the simple collector window")
     parser.add_argument("--mock", action="store_true", help="Use simulated telemetry data")
-    parser.add_argument("--server", default="http://localhost:8000", help="Timing server URL")
+    parser.add_argument("--server", default=LIVE_SERVER_URL, help="Timing server URL")
     parser.add_argument("--race", help="Race code, for example TRC8H")
     parser.add_argument("--entry", help="Entry ID, for example car_23")
     parser.add_argument("--driver", help="Driver ID, for example florian")
