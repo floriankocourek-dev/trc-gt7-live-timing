@@ -173,6 +173,7 @@ def init_db() -> None:
                 tire_temp_fr REAL,
                 tire_temp_rl REAL,
                 tire_temp_rr REAL,
+                gt7_telemetry_json TEXT,
                 telemetry_status TEXT NOT NULL,
                 received_at TEXT NOT NULL
             );
@@ -201,6 +202,7 @@ def init_db() -> None:
                 tire_temp_fr REAL,
                 tire_temp_rl REAL,
                 tire_temp_rr REAL,
+                gt7_telemetry_json TEXT,
                 telemetry_status TEXT NOT NULL,
                 received_at TEXT NOT NULL
             );
@@ -222,6 +224,7 @@ def init_db() -> None:
             ensure_column(conn, table, "tire_temp_fr", "REAL")
             ensure_column(conn, table, "tire_temp_rl", "REAL")
             ensure_column(conn, table, "tire_temp_rr", "REAL")
+            ensure_column(conn, table, "gt7_telemetry_json", "TEXT")
 
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -294,6 +297,7 @@ class TelemetryIn(BaseModel):
     tire_temp_fr: float | None = None
     tire_temp_rl: float | None = None
     tire_temp_rr: float | None = None
+    gt7_telemetry: dict[str, Any] | None = None
     telemetry_status: str = "valid"
 
 
@@ -545,6 +549,7 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
         "tire_temp_fr": latest_dict.get("tire_temp_fr"),
         "tire_temp_rl": latest_dict.get("tire_temp_rl"),
         "tire_temp_rr": latest_dict.get("tire_temp_rr"),
+        "gt7_telemetry": json.loads(latest_dict["gt7_telemetry_json"]) if latest_dict.get("gt7_telemetry_json") else None,
         "current_stint_laps": current_stint_laps,
         "last_seen": latest_dict.get("received_at"),
         "connection_status": connection_status(latest),
@@ -598,8 +603,12 @@ class WebSocketHub:
             sockets = self._sockets.get(race_id, [])
             self._sockets[race_id] = [item for item in sockets if item[0] is not websocket]
 
+    async def viewer_count(self, race_id: str) -> int:
+        async with self._lock:
+            return sum(1 for _websocket, kind, _token in self._sockets.get(race_id, []) if kind == "public")
+
     async def send_snapshot(self, race_id: str, websocket: WebSocket, kind: str, token: str | None = None) -> None:
-        payload = build_socket_payload(race_id, kind, token)
+        payload = await build_socket_payload(race_id, kind, token)
         await websocket.send_json(payload)
 
     async def broadcast(self, race_id: str) -> None:
@@ -629,9 +638,9 @@ def startup() -> None:
     init_db()
 
 
-def build_socket_payload(race_id: str, kind: str, token: str | None = None) -> dict[str, Any]:
+async def build_socket_payload(race_id: str, kind: str, token: str | None = None) -> dict[str, Any]:
     if kind == "public":
-        return {"type": "standings", "race_id": race_id, "standings": compute_standings(race_id)}
+        return {"type": "standings", "race_id": race_id, "standings": compute_standings(race_id), "viewer_count": await hub.viewer_count(race_id)}
     if kind == "team":
         if not token:
             raise HTTPException(status_code=401, detail="Missing team token")
@@ -999,6 +1008,7 @@ async def telemetry_ingest(payload: TelemetryIn, session: sqlite3.Row = Depends(
         payload.tire_temp_fr,
         payload.tire_temp_rl,
         payload.tire_temp_rr,
+        json.dumps(payload.gt7_telemetry) if payload.gt7_telemetry else None,
         payload.telemetry_status,
         received_at,
     )
@@ -1009,8 +1019,9 @@ async def telemetry_ingest(payload: TelemetryIn, session: sqlite3.Row = Depends(
             INSERT INTO telemetry_packets (race_id, entry_id, driver_id, collector_id, timestamp, lap, lap_progress,
                                            last_lap_ms, best_lap_ms, speed_kmh, fuel_liters, gear, rpm, throttle,
                                            brake, position_x, position_y, position_z, tire_compound, tire_temp_fl,
-                                           tire_temp_fr, tire_temp_rl, tire_temp_rr, telemetry_status, received_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                           tire_temp_fr, tire_temp_rl, tire_temp_rr, gt7_telemetry_json,
+                                           telemetry_status, received_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             params,
         )
@@ -1019,8 +1030,9 @@ async def telemetry_ingest(payload: TelemetryIn, session: sqlite3.Row = Depends(
             INSERT INTO latest_telemetry (race_id, entry_id, driver_id, collector_id, timestamp, lap, lap_progress,
                                           last_lap_ms, best_lap_ms, speed_kmh, fuel_liters, gear, rpm, throttle,
                                           brake, position_x, position_y, position_z, tire_compound, tire_temp_fl,
-                                          tire_temp_fr, tire_temp_rl, tire_temp_rr, telemetry_status, received_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                          tire_temp_fr, tire_temp_rl, tire_temp_rr, gt7_telemetry_json,
+                                          telemetry_status, received_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(entry_id) DO UPDATE SET
                 race_id = excluded.race_id,
                 driver_id = excluded.driver_id,
@@ -1044,6 +1056,7 @@ async def telemetry_ingest(payload: TelemetryIn, session: sqlite3.Row = Depends(
                 tire_temp_fr = excluded.tire_temp_fr,
                 tire_temp_rl = excluded.tire_temp_rl,
                 tire_temp_rr = excluded.tire_temp_rr,
+                gt7_telemetry_json = excluded.gt7_telemetry_json,
                 telemetry_status = excluded.telemetry_status,
                 received_at = excluded.received_at
             """,

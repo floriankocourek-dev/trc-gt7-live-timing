@@ -46,6 +46,7 @@ async function api(path, options = {}) {
 
 function App() {
   const [view, setView] = useState('public');
+  const [publicRaceId, setPublicRaceId] = useState(localStorage.getItem('publicRace') || '');
 
   return (
     <main className="shell">
@@ -67,17 +68,17 @@ function App() {
         </nav>
       </header>
 
-      {view === 'public' && <PublicTiming />}
+      {view === 'public' && <PublicTiming raceId={publicRaceId} setRaceId={setPublicRaceId} />}
       {view === 'team' && <TeamEngineer />}
       {view === 'control' && <RaceControl />}
     </main>
   );
 }
 
-function PublicTiming() {
-  const [raceId, setRaceId] = useState(localStorage.getItem('publicRace') || '');
+function PublicTiming({ raceId, setRaceId }) {
   const [races, setRaces] = useState([]);
   const [standings, setStandings] = useState([]);
+  const [viewerCount, setViewerCount] = useState(null);
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
   const [classFilter, setClassFilter] = useState('all');
@@ -102,7 +103,7 @@ function PublicTiming() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [raceId, setRaceId]);
 
   useEffect(() => {
     if (!raceId) {
@@ -121,7 +122,10 @@ function PublicTiming() {
     socket.onopen = () => alive && setStatus('live');
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      if (data.type === 'standings') setStandings(data.standings);
+      if (data.type === 'standings') {
+        setStandings(data.standings);
+        setViewerCount(data.viewer_count);
+      }
     };
     socket.onerror = () => alive && setStatus('reconnecting');
     socket.onclose = () => alive && setStatus('offline');
@@ -153,6 +157,7 @@ function PublicTiming() {
           </select>
         </label>
         <LiveBadge status={status} />
+        <div className="viewerBadge"><Radio size={16} /> {viewerCount ?? '-'} viewers</div>
       </div>
       {error && <p className="notice error">{error}</p>}
       {!races.length && <p className="notice">No races created yet.</p>}
@@ -284,6 +289,23 @@ function TeamEngineer() {
   );
 }
 
+function formatTelemetryLabel(key) {
+  return key
+    .replaceAll('_', ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .replace('Rpm', 'RPM')
+    .replace('Gt7', 'GT7')
+    .replace('Mps', 'm/s')
+    .replace('Kmh', 'km/h');
+}
+
+function formatTelemetryValue(value) {
+  if (Array.isArray(value)) return value.map((item) => (typeof item === 'number' ? Number(item.toFixed(3)) : item)).join(', ');
+  if (typeof value === 'number') return Number(value.toFixed(3));
+  if (typeof value === 'boolean') return value ? 'yes' : 'no';
+  return fmt(value);
+}
+
 function EngineerPanel({ state }) {
   const entry = state.entry;
   const standing = state.standing || {};
@@ -320,6 +342,17 @@ function EngineerPanel({ state }) {
         <Metric label="Pit Stops" value={fmt(standing.pit_stops)} />
         <Metric label="Connection" value={fmt(state.connection_status)} />
       </div>
+
+      {state.gt7_telemetry && (
+        <>
+          <h2>GT7 Telemetry</h2>
+          <div className="telemetryGrid">
+            {Object.entries(state.gt7_telemetry).map(([key, value]) => (
+              <Metric key={key} label={formatTelemetryLabel(key)} value={formatTelemetryValue(value)} />
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

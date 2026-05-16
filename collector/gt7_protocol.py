@@ -44,7 +44,20 @@ class GT7Packet:
     position_y: float
     position_z: float
     speed_mps: float
+    velocity_x: float
+    velocity_y: float
+    velocity_z: float
+    rotation_pitch: float
+    rotation_yaw: float
+    rotation_roll: float
+    angular_velocity_x: float
+    angular_velocity_y: float
+    angular_velocity_z: float
+    ride_height: float
     engine_rpm: float
+    oil_pressure: float
+    water_temp: float
+    oil_temp: float
     fuel_level: float
     fuel_capacity: float
     tire_temp_fl: float | None
@@ -55,6 +68,30 @@ class GT7Packet:
     brake_raw: int
     current_gear: int | None
     suggested_gear: int | None
+    rpm_rev_warning: int
+    rpm_rev_limiter: int
+    estimated_top_speed: int
+    clutch: float
+    clutch_engaged: float
+    rpm_after_clutch: float
+    tire_speed_fl: float
+    tire_speed_fr: float
+    tire_speed_rl: float
+    tire_speed_rr: float
+    tire_slip_fl: float
+    tire_slip_fr: float
+    tire_slip_rl: float
+    tire_slip_rr: float
+    tire_diameter_fl: float
+    tire_diameter_fr: float
+    tire_diameter_rl: float
+    tire_diameter_rr: float
+    suspension_fl: float
+    suspension_fr: float
+    suspension_rl: float
+    suspension_rr: float
+    gear_ratios: list[float]
+    car_id: int
     flags: int
 
     @property
@@ -68,6 +105,64 @@ class GT7Packet:
     @property
     def brake_percent(self) -> float:
         return max(0.0, min(100.0, self.brake_raw / 255 * 100))
+
+    def as_private_telemetry(self) -> dict[str, float | int | str | bool | None | list[float]]:
+        return {
+            "packet_id": self.packet_id,
+            "total_laps": self.total_laps,
+            "speed_mps": self.speed_mps,
+            "speed_kmh": self.speed_kmh,
+            "velocity_x": self.velocity_x,
+            "velocity_y": self.velocity_y,
+            "velocity_z": self.velocity_z,
+            "rotation_pitch": self.rotation_pitch,
+            "rotation_yaw": self.rotation_yaw,
+            "rotation_roll": self.rotation_roll,
+            "angular_velocity_x": self.angular_velocity_x,
+            "angular_velocity_y": self.angular_velocity_y,
+            "angular_velocity_z": self.angular_velocity_z,
+            "ride_height": self.ride_height,
+            "engine_rpm": self.engine_rpm,
+            "rpm_rev_warning": self.rpm_rev_warning,
+            "rpm_rev_limiter": self.rpm_rev_limiter,
+            "estimated_top_speed": self.estimated_top_speed,
+            "oil_pressure": self.oil_pressure,
+            "water_temp": self.water_temp,
+            "oil_temp": self.oil_temp,
+            "fuel_level": self.fuel_level,
+            "fuel_capacity": self.fuel_capacity,
+            "throttle_raw": self.throttle_raw,
+            "brake_raw": self.brake_raw,
+            "current_gear": self.current_gear,
+            "suggested_gear": self.suggested_gear,
+            "clutch": self.clutch,
+            "clutch_engaged": self.clutch_engaged,
+            "rpm_after_clutch": self.rpm_after_clutch,
+            "tire_temp_fl": self.tire_temp_fl,
+            "tire_temp_fr": self.tire_temp_fr,
+            "tire_temp_rl": self.tire_temp_rl,
+            "tire_temp_rr": self.tire_temp_rr,
+            "tire_speed_fl": self.tire_speed_fl,
+            "tire_speed_fr": self.tire_speed_fr,
+            "tire_speed_rl": self.tire_speed_rl,
+            "tire_speed_rr": self.tire_speed_rr,
+            "tire_slip_fl": self.tire_slip_fl,
+            "tire_slip_fr": self.tire_slip_fr,
+            "tire_slip_rl": self.tire_slip_rl,
+            "tire_slip_rr": self.tire_slip_rr,
+            "tire_diameter_fl": self.tire_diameter_fl,
+            "tire_diameter_fr": self.tire_diameter_fr,
+            "tire_diameter_rl": self.tire_diameter_rl,
+            "tire_diameter_rr": self.tire_diameter_rr,
+            "suspension_fl": self.suspension_fl,
+            "suspension_fr": self.suspension_fr,
+            "suspension_rl": self.suspension_rl,
+            "suspension_rr": self.suspension_rr,
+            "gear_ratios": self.gear_ratios,
+            "car_id": self.car_id,
+            "flags": self.flags,
+            "telemetry_status": self.telemetry_status,
+        }
 
     @property
     def telemetry_status(self) -> str:
@@ -151,6 +246,9 @@ def parse_gt7_packet(plain: bytes) -> GT7Packet:
     def u32(offset: int) -> int:
         return struct.unpack_from("<I", plain, offset)[0]
 
+    def i32(offset: int) -> int:
+        return struct.unpack_from("<i", plain, offset)[0]
+
     def nullable_u16(value: int) -> int | None:
         return None if value == 0xFFFF else value
 
@@ -175,8 +273,21 @@ def parse_gt7_packet(plain: bytes) -> GT7Packet:
         position_x=f32(0x04),
         position_y=f32(0x08),
         position_z=f32(0x0C),
+        velocity_x=f32(0x10),
+        velocity_y=f32(0x14),
+        velocity_z=f32(0x18),
+        rotation_pitch=f32(0x1C),
+        rotation_yaw=f32(0x20),
+        rotation_roll=f32(0x24),
+        angular_velocity_x=f32(0x2C),
+        angular_velocity_y=f32(0x30),
+        angular_velocity_z=f32(0x34),
+        ride_height=f32(0x38),
         speed_mps=f32(0x4C),
         engine_rpm=f32(0x3C),
+        oil_pressure=f32(0x54),
+        water_temp=f32(0x58),
+        oil_temp=f32(0x5C),
         fuel_level=f32(0x44),
         fuel_capacity=f32(0x48),
         tire_temp_fl=f32(0x60),
@@ -187,6 +298,30 @@ def parse_gt7_packet(plain: bytes) -> GT7Packet:
         brake_raw=u8(0x92),
         current_gear=current_gear,
         suggested_gear=suggested_gear,
+        rpm_rev_warning=u16(0x88),
+        rpm_rev_limiter=u16(0x8A),
+        estimated_top_speed=u16(0x8C),
+        clutch=f32(0xF4),
+        clutch_engaged=f32(0xF8),
+        rpm_after_clutch=f32(0xFC),
+        tire_speed_fl=f32(0xA4),
+        tire_speed_fr=f32(0xA8),
+        tire_speed_rl=f32(0xAC),
+        tire_speed_rr=f32(0xB0),
+        tire_slip_fl=f32(0xB4),
+        tire_slip_fr=f32(0xB8),
+        tire_slip_rl=f32(0xBC),
+        tire_slip_rr=f32(0xC0),
+        tire_diameter_fl=f32(0xC4),
+        tire_diameter_fr=f32(0xC8),
+        tire_diameter_rl=f32(0xCC),
+        tire_diameter_rr=f32(0xD0),
+        suspension_fl=f32(0xD4),
+        suspension_fr=f32(0xD8),
+        suspension_rl=f32(0xDC),
+        suspension_rr=f32(0xE0),
+        gear_ratios=[f32(offset) for offset in range(0x104, 0x124, 4)],
+        car_id=i32(0x124),
         flags=u16(0x8E),
     )
 

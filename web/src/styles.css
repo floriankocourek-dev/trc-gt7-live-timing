@@ -227,7 +227,8 @@ tr:hover td {
 }
 
 .pill,
-.liveBadge {
+.liveBadge,
+.viewerBadge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -239,6 +240,11 @@ tr:hover td {
   font-size: 12px;
   font-weight: 900;
   text-transform: uppercase;
+}
+
+.viewerBadge {
+  background: #f1f1ec;
+  color: #171717;
 }
 
 .pill.online,
@@ -319,6 +325,13 @@ tr:hover td {
   display: grid;
   grid-template-columns: repeat(5, minmax(140px, 1fr));
   gap: 10px;
+}
+
+.telemetryGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .metric {
@@ -408,7 +421,8 @@ tr:hover td {
 
   .controlGrid,
   .entryRow,
-  .metricGrid {
+  .metricGrid,
+  .telemetryGrid {
     grid-template-columns: 1fr;
   }
 

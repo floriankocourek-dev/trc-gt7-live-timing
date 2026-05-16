@@ -32,6 +32,7 @@ class TelemetryPacket:
     tire_temp_fr: float | None = None
     tire_temp_rl: float | None = None
     tire_temp_rr: float | None = None
+    gt7_telemetry: dict | None = None
     telemetry_status: str = "valid"
 
     def as_payload(self) -> dict:
@@ -55,6 +56,7 @@ class TelemetryPacket:
             "tire_temp_fr": round(self.tire_temp_fr, 1) if self.tire_temp_fr is not None else None,
             "tire_temp_rl": round(self.tire_temp_rl, 1) if self.tire_temp_rl is not None else None,
             "tire_temp_rr": round(self.tire_temp_rr, 1) if self.tire_temp_rr is not None else None,
+            "gt7_telemetry": self.gt7_telemetry,
             "telemetry_status": self.telemetry_status,
         }
 
@@ -131,6 +133,12 @@ class MockTelemetrySource(TelemetrySource):
                 tire_temp_fr=83 + 8 * math.sin(phase * 2.0 + 0.2),
                 tire_temp_rl=78 + 6 * math.sin(phase * 1.7),
                 tire_temp_rr=79 + 6 * math.sin(phase * 1.7 + 0.2),
+                gt7_telemetry={
+                    "source": "mock",
+                    "fuel_capacity": self.fuel_liters,
+                    "base_lap_seconds": self.base_lap_seconds,
+                    "update_interval": self.update_interval,
+                },
             )
             time.sleep(self.update_interval)
 
@@ -206,5 +214,6 @@ class GT7TelemetrySource(TelemetrySource):
                     tire_temp_fr=packet.tire_temp_fr,
                     tire_temp_rl=packet.tire_temp_rl,
                     tire_temp_rr=packet.tire_temp_rr,
+                    gt7_telemetry=packet.as_private_telemetry(),
                     telemetry_status=packet.telemetry_status,
                 )
