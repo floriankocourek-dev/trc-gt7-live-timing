@@ -28,8 +28,10 @@ ONLINE_WINDOW_SECONDS = 10
 REFERENCE_LAP_SECONDS = 500
 PIT_FUEL_INCREASE_LITERS = 1.0
 PIT_EXIT_SPEED_KMH = 90.0
-MIN_REFERENCE_POINTS = 120
+MIN_REFERENCE_POINTS = 40
+IDEAL_REFERENCE_POINTS = 120
 REFERENCE_CLOSE_DISTANCE_RATIO = 0.08
+MIN_TRACK_DIAGONAL = 100.0
 
 
 def now_iso() -> str:
@@ -478,8 +480,25 @@ def reference_lap_is_complete(points: list[dict[str, Any]]) -> bool:
     if len(points) < MIN_REFERENCE_POINTS:
         return False
     bounds = track_bounds(points)
+    diagonal = track_diagonal(bounds)
+    if diagonal < MIN_TRACK_DIAGONAL:
+        return False
     max_close_distance = max(50.0, track_diagonal(bounds) * REFERENCE_CLOSE_DISTANCE_RATIO)
     return point_distance(points[0], points[-1]) <= max_close_distance
+
+
+def reference_rejection_reason(points: list[dict[str, Any]]) -> str:
+    if len(points) < MIN_REFERENCE_POINTS:
+        return f"only {len(points)} points, minimum is {MIN_REFERENCE_POINTS}"
+    bounds = track_bounds(points)
+    diagonal = track_diagonal(bounds)
+    if diagonal < MIN_TRACK_DIAGONAL:
+        return f"track span too small ({diagonal:.1f})"
+    close_distance = point_distance(points[0], points[-1])
+    max_close_distance = max(50.0, diagonal * REFERENCE_CLOSE_DISTANCE_RATIO)
+    if close_distance > max_close_distance:
+        return f"start/end too far apart ({close_distance:.1f} > {max_close_distance:.1f})"
+    return "unknown"
 
 
 def normalize_track_point(point: dict[str, Any], bounds: dict[str, float]) -> dict[str, float]:
@@ -579,7 +598,7 @@ def update_track_reference(conn: sqlite3.Connection, session: sqlite3.Row, paylo
                 session["race_id"],
                 session["entry_id"],
                 "warning",
-                f"Trackmap rejected incomplete reference from {session['entry_id']} lap {buffer['lap']} ({len(points)} points)",
+                f"Trackmap rejected incomplete reference from {session['entry_id']} lap {buffer['lap']}: {reference_rejection_reason(points)}",
                 received_at,
             ),
         )
