@@ -315,6 +315,85 @@ tr:hover td {
   color: #ff536c;
 }
 
+.trackMapPanel {
+  margin: 14px 0;
+  border: 1px solid #deded8;
+  border-radius: 8px;
+  background: #111111;
+  color: white;
+  overflow: hidden;
+}
+
+.trackMapHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px 0;
+}
+
+.trackMapHeader p {
+  color: #b8bec9;
+  font-weight: 700;
+}
+
+.trackMapEmpty {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: #d7d7d2;
+  font-weight: 800;
+  text-align: center;
+  padding: 22px;
+}
+
+.trackMapEmpty span {
+  color: #8d96a6;
+  font-size: 13px;
+}
+
+.trackMap {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 260px;
+}
+
+.trackLineShadow,
+.trackLine {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.trackLineShadow {
+  stroke: rgba(255,255,255,0.16);
+  stroke-width: 24;
+}
+
+.trackLine {
+  stroke: #f1f1ec;
+  stroke-width: 8;
+}
+
+.carMarker circle {
+  fill: #c5132f;
+  stroke: white;
+  stroke-width: 4;
+}
+
+.carMarker.offline circle {
+  fill: #6c7280;
+}
+
+.carMarker text {
+  fill: white;
+  font-size: 13px;
+  font-weight: 900;
+  pointer-events: none;
+}
+
 .rankBox {
   font-size: clamp(38px, 8vw, 76px);
   font-weight: 950;

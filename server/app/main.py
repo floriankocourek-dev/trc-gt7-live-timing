@@ -28,6 +28,7 @@ ONLINE_WINDOW_SECONDS = 10
 REFERENCE_LAP_SECONDS = 500
 PIT_FUEL_INCREASE_LITERS = 1.0
 PIT_EXIT_SPEED_KMH = 90.0
+MIN_REFERENCE_POINTS = 20
 
 
 def now_iso() -> str:
@@ -214,6 +215,26 @@ def init_db() -> None:
                 level TEXT NOT NULL,
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS track_references (
+                race_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                source_entry_id TEXT,
+                source_lap INTEGER,
+                points_json TEXT NOT NULL,
+                bounds_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS track_lap_buffers (
+                entry_id TEXT PRIMARY KEY,
+                race_id TEXT NOT NULL,
+                lap INTEGER NOT NULL,
+                points_json TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             """
         )
@@ -427,6 +448,123 @@ def connection_status(latest: sqlite3.Row | None) -> str:
     return "online" if age <= ONLINE_WINDOW_SECONDS else "offline"
 
 
+def track_point(payload: TelemetryIn, received_at: str) -> dict[str, Any] | None:
+    if payload.position_x is None or payload.position_z is None:
+        return None
+    return {
+        "x": round(float(payload.position_x), 3),
+        "y": round(float(payload.position_y), 3) if payload.position_y is not None else None,
+        "z": round(float(payload.position_z), 3),
+        "timestamp": payload.timestamp or received_at,
+    }
+
+
+def point_distance(a: dict[str, Any], b: dict[str, Any]) -> float:
+    return ((float(a["x"]) - float(b["x"])) ** 2 + (float(a["z"]) - float(b["z"])) ** 2) ** 0.5
+
+
+def track_bounds(points: list[dict[str, Any]]) -> dict[str, float]:
+    xs = [float(point["x"]) for point in points]
+    zs = [float(point["z"]) for point in points]
+    return {"min_x": min(xs), "max_x": max(xs), "min_z": min(zs), "max_z": max(zs)}
+
+
+def normalize_track_point(point: dict[str, Any], bounds: dict[str, float]) -> dict[str, float]:
+    width = max(bounds["max_x"] - bounds["min_x"], 1.0)
+    height = max(bounds["max_z"] - bounds["min_z"], 1.0)
+    return {
+        "x": round((float(point["x"]) - bounds["min_x"]) / width, 5),
+        "y": round((float(point["z"]) - bounds["min_z"]) / height, 5),
+    }
+
+
+def nearest_reference_point(points: list[dict[str, Any]], x: float, z: float) -> tuple[int, dict[str, Any]] | None:
+    if not points:
+        return None
+    index, point = min(
+        enumerate(points),
+        key=lambda item: (float(item[1]["x"]) - x) ** 2 + (float(item[1]["z"]) - z) ** 2,
+    )
+    return index, point
+
+
+def reference_progress(conn: sqlite3.Connection, race_id: str, x: float | None, z: float | None) -> float | None:
+    if x is None or z is None:
+        return None
+    reference = conn.execute("SELECT points_json FROM track_references WHERE race_id = ? AND status = 'active'", (race_id,)).fetchone()
+    if not reference:
+        return None
+    points = json.loads(reference["points_json"])
+    nearest = nearest_reference_point(points, float(x), float(z))
+    if not nearest or len(points) < 2:
+        return None
+    index, _point = nearest
+    return round(index / (len(points) - 1), 4)
+
+
+def update_track_reference(conn: sqlite3.Connection, session: sqlite3.Row, payload: TelemetryIn, received_at: str) -> None:
+    if payload.lap <= 0 or payload.telemetry_status != "valid":
+        return
+    point = track_point(payload, received_at)
+    if not point:
+        return
+    if conn.execute("SELECT race_id FROM track_references WHERE race_id = ? AND status = 'active'", (session["race_id"],)).fetchone():
+        return
+
+    buffer = conn.execute("SELECT * FROM track_lap_buffers WHERE entry_id = ?", (session["entry_id"],)).fetchone()
+    if not buffer:
+        conn.execute(
+            "INSERT INTO track_lap_buffers (entry_id, race_id, lap, points_json, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (session["entry_id"], session["race_id"], payload.lap, json.dumps([point]), received_at, received_at),
+        )
+        return
+
+    points = json.loads(buffer["points_json"])
+    if payload.lap == buffer["lap"]:
+        if not points or point_distance(points[-1], point) >= 2.0:
+            points.append(point)
+            conn.execute(
+                "UPDATE track_lap_buffers SET points_json = ?, updated_at = ? WHERE entry_id = ?",
+                (json.dumps(points), received_at, session["entry_id"]),
+            )
+        return
+
+    if payload.lap > buffer["lap"] and len(points) >= MIN_REFERENCE_POINTS:
+        bounds = track_bounds(points)
+        conn.execute(
+            """
+            INSERT INTO track_references (race_id, status, source_entry_id, source_lap, points_json, bounds_json, created_at, updated_at)
+            VALUES (?, 'active', ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(race_id) DO UPDATE SET
+                status = excluded.status,
+                source_entry_id = excluded.source_entry_id,
+                source_lap = excluded.source_lap,
+                points_json = excluded.points_json,
+                bounds_json = excluded.bounds_json,
+                updated_at = excluded.updated_at
+            """,
+            (session["race_id"], session["entry_id"], buffer["lap"], json.dumps(points), json.dumps(bounds), received_at, received_at),
+        )
+        conn.execute(
+            "INSERT INTO race_log (race_id, entry_id, level, message, created_at) VALUES (?, ?, ?, ?, ?)",
+            (session["race_id"], session["entry_id"], "info", f"Trackmap reference lap recorded from {session['entry_id']} lap {buffer['lap']}", received_at),
+        )
+
+    conn.execute(
+        """
+        INSERT INTO track_lap_buffers (entry_id, race_id, lap, points_json, started_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(entry_id) DO UPDATE SET
+            race_id = excluded.race_id,
+            lap = excluded.lap,
+            points_json = excluded.points_json,
+            started_at = excluded.started_at,
+            updated_at = excluded.updated_at
+        """,
+        (session["entry_id"], session["race_id"], payload.lap, json.dumps([point]), received_at, received_at),
+    )
+
+
 def compute_standings(race_id: str) -> list[dict[str, Any]]:
     rows = fetch_all(
         """
@@ -499,6 +637,75 @@ def public_race_list() -> list[dict[str, Any]]:
     return [row_to_race(row) for row in rows]
 
 
+def trackmap_for_race(race_id: str) -> dict[str, Any]:
+    if not fetch_one("SELECT race_id FROM races WHERE race_id = ?", (race_id,)):
+        raise HTTPException(status_code=404, detail="Race not found")
+    reference = fetch_one("SELECT * FROM track_references WHERE race_id = ? AND status = 'active'", (race_id,))
+    rows = fetch_all(
+        """
+        SELECT e.entry_id, e.car_number, e.team_name, e.car_class, lt.driver_id, lt.position_x, lt.position_y,
+               lt.position_z, lt.received_at, lt.lap
+        FROM entries e
+        LEFT JOIN latest_telemetry lt ON lt.entry_id = e.entry_id
+        WHERE e.race_id = ?
+        ORDER BY e.car_number
+        """,
+        (race_id,),
+    )
+    if not reference:
+        buffers = fetch_all("SELECT entry_id, lap, points_json FROM track_lap_buffers WHERE race_id = ?", (race_id,))
+        return {
+            "status": "calibrating",
+            "race_id": race_id,
+            "points": [],
+            "bounds": None,
+            "source_entry_id": None,
+            "source_lap": None,
+            "calibration": [
+                {"entry_id": row["entry_id"], "lap": row["lap"], "points": len(json.loads(row["points_json"]))}
+                for row in buffers
+            ],
+            "cars": [],
+        }
+
+    points = json.loads(reference["points_json"])
+    bounds = json.loads(reference["bounds_json"])
+    cars: list[dict[str, Any]] = []
+    for row in rows:
+        if row["position_x"] is None or row["position_z"] is None:
+            continue
+        nearest = nearest_reference_point(points, float(row["position_x"]), float(row["position_z"]))
+        if not nearest:
+            continue
+        index, point = nearest
+        normalized = normalize_track_point(point, bounds)
+        cars.append(
+            {
+                "entry_id": row["entry_id"],
+                "car_number": row["car_number"],
+                "team_name": row["team_name"],
+                "class": row["car_class"],
+                "driver_id": row["driver_id"],
+                "lap": row["lap"],
+                "connection_status": connection_status(row),
+                "x": normalized["x"],
+                "y": normalized["y"],
+                "progress": round(index / (len(points) - 1), 4) if len(points) > 1 else 0,
+            }
+        )
+
+    return {
+        "status": "active",
+        "race_id": race_id,
+        "points": [normalize_track_point(point, bounds) for point in points],
+        "bounds": bounds,
+        "source_entry_id": reference["source_entry_id"],
+        "source_lap": reference["source_lap"],
+        "calibration": [],
+        "cars": cars,
+    }
+
+
 def private_state_for_entry(entry_id: str) -> dict[str, Any]:
     entry = fetch_one("SELECT * FROM entries WHERE entry_id = ?", (entry_id,))
     if not entry:
@@ -530,9 +737,16 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
             current_stint_laps = lap_delta
 
     latest_dict = dict(latest) if latest else {}
+    trackmap = trackmap_for_race(entry["race_id"])
+    if trackmap["status"] == "active":
+        trackmap = {
+            **trackmap,
+            "cars": [car for car in trackmap["cars"] if car["entry_id"] == entry_id],
+        }
     return {
         "entry": row_to_entry(entry),
         "standing": own_standing,
+        "trackmap": trackmap,
         "fuel_liters": latest_dict.get("fuel_liters"),
         "fuel_per_lap": fuel_per_lap,
         "estimated_laps_remaining": estimated_laps_remaining,
@@ -766,6 +980,8 @@ async def delete_race(race_id: str, _: str = Depends(require_admin)) -> dict[str
             conn.execute("DELETE FROM team_sessions WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM entries WHERE race_id = ?", (race_id,))
         conn.execute("DELETE FROM race_log WHERE race_id = ?", (race_id,))
+        conn.execute("DELETE FROM track_references WHERE race_id = ?", (race_id,))
+        conn.execute("DELETE FROM track_lap_buffers WHERE race_id = ?", (race_id,))
         conn.execute("DELETE FROM races WHERE race_id = ?", (race_id,))
     await hub.broadcast(race_id)
     return {"ok": True, "race_id": race_id}
@@ -829,6 +1045,7 @@ async def delete_entry(entry_id: str, _: str = Depends(require_admin)) -> dict[s
         conn.execute("DELETE FROM latest_telemetry WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM collector_sessions WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM team_sessions WHERE entry_id = ?", (entry_id,))
+        conn.execute("DELETE FROM track_lap_buffers WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
         conn.execute(
             "INSERT INTO race_log (race_id, entry_id, level, message, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -884,6 +1101,11 @@ def public_standings(race_id: str) -> list[dict[str, Any]]:
     if not fetch_one("SELECT race_id FROM races WHERE race_id = ?", (race_id,)):
         raise HTTPException(status_code=404, detail="Race not found")
     return compute_standings(race_id)
+
+
+@app.get("/api/public/races/{race_id}/trackmap")
+def public_trackmap(race_id: str) -> dict[str, Any]:
+    return trackmap_for_race(race_id)
 
 
 @app.get("/api/public/races")
@@ -984,6 +1206,10 @@ def collector_entries(race_id: str) -> dict[str, Any]:
 async def telemetry_ingest(payload: TelemetryIn, session: sqlite3.Row = Depends(require_collector)) -> dict[str, Any]:
     received_at = now_iso()
     timestamp = payload.timestamp or received_at
+    with db() as conn:
+        update_track_reference(conn, session, payload, received_at)
+        effective_lap_progress = reference_progress(conn, session["race_id"], payload.position_x, payload.position_z)
+    lap_progress = effective_lap_progress if effective_lap_progress is not None else payload.lap_progress
     params = (
         session["race_id"],
         session["entry_id"],
@@ -991,7 +1217,7 @@ async def telemetry_ingest(payload: TelemetryIn, session: sqlite3.Row = Depends(
         session["collector_id"],
         timestamp,
         payload.lap,
-        payload.lap_progress,
+        lap_progress,
         payload.last_lap_ms,
         payload.best_lap_ms,
         payload.speed_kmh,

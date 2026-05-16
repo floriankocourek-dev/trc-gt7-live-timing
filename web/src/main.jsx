@@ -78,6 +78,7 @@ function App() {
 function PublicTiming({ raceId, setRaceId }) {
   const [races, setRaces] = useState([]);
   const [standings, setStandings] = useState([]);
+  const [trackMap, setTrackMap] = useState(null);
   const [viewerCount, setViewerCount] = useState(null);
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
@@ -108,6 +109,7 @@ function PublicTiming({ raceId, setRaceId }) {
   useEffect(() => {
     if (!raceId) {
       setStandings([]);
+      setTrackMap(null);
       setStatus('idle');
       return undefined;
     }
@@ -117,6 +119,9 @@ function PublicTiming({ raceId, setRaceId }) {
     api(`/api/public/races/${raceId}/standings`)
       .then((data) => alive && setStandings(data))
       .catch((err) => alive && setError(err.message));
+    api(`/api/public/races/${raceId}/trackmap`)
+      .then((data) => alive && setTrackMap(data))
+      .catch(() => alive && setTrackMap(null));
 
     const socket = new WebSocket(`${WS_BASE}/ws/races/${raceId}/public`);
     socket.onopen = () => alive && setStatus('live');
@@ -125,6 +130,9 @@ function PublicTiming({ raceId, setRaceId }) {
       if (data.type === 'standings') {
         setStandings(data.standings);
         setViewerCount(data.viewer_count);
+        api(`/api/public/races/${raceId}/trackmap`)
+          .then((mapData) => alive && setTrackMap(mapData))
+          .catch(() => alive && setTrackMap(null));
       }
     };
     socket.onerror = () => alive && setStatus('reconnecting');
@@ -161,7 +169,56 @@ function PublicTiming({ raceId, setRaceId }) {
       </div>
       {error && <p className="notice error">{error}</p>}
       {!races.length && <p className="notice">No races created yet.</p>}
+      <TrackMap trackMap={trackMap} />
       <StandingsTable rows={visibleRows} />
+    </section>
+  );
+}
+
+function TrackMap({ trackMap, focusEntryId }) {
+  if (!trackMap) return null;
+  const width = 1000;
+  const height = 560;
+  const points = trackMap.points || [];
+  const polyline = points.map((point) => `${point.x * width},${height - point.y * height}`).join(' ');
+  const visibleCars = focusEntryId ? (trackMap.cars || []).filter((car) => car.entry_id === focusEntryId) : (trackMap.cars || []);
+
+  return (
+    <section className="trackMapPanel">
+      <div className="trackMapHeader">
+        <div>
+          <h2>Trackmap</h2>
+          <p>
+            {trackMap.status === 'active'
+              ? `Reference: ${trackMap.source_entry_id} lap ${trackMap.source_lap}`
+              : 'Calibrating from the first completed valid lap.'}
+          </p>
+        </div>
+        <StatusPill value={trackMap.status} />
+      </div>
+      {trackMap.status !== 'active' ? (
+        <div className="trackMapEmpty">
+          Trackmap starts after the first completed lap.
+          {!!trackMap.calibration?.length && (
+            <span>{trackMap.calibration.map((item) => `${item.entry_id}: ${item.points} pts`).join(' | ')}</span>
+          )}
+        </div>
+      ) : (
+        <svg className="trackMap" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Live trackmap">
+          <polyline className="trackLineShadow" points={polyline} />
+          <polyline className="trackLine" points={polyline} />
+          {visibleCars.map((car) => {
+            const x = car.x * width;
+            const y = height - car.y * height;
+            return (
+              <g key={car.entry_id} className={`carMarker ${car.connection_status}`}>
+                <circle cx={x} cy={y} r="13" />
+                <text x={x} y={y + 4} textAnchor="middle">#{car.car_number}</text>
+              </g>
+            );
+          })}
+        </svg>
+      )}
     </section>
   );
 }
@@ -342,6 +399,8 @@ function EngineerPanel({ state }) {
         <Metric label="Pit Stops" value={fmt(standing.pit_stops)} />
         <Metric label="Connection" value={fmt(state.connection_status)} />
       </div>
+
+      <TrackMap trackMap={state.trackmap} focusEntryId={entry.entry_id} />
 
       {state.gt7_telemetry && (
         <>
