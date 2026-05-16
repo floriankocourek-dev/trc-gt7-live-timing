@@ -744,6 +744,24 @@ def get_race(race_id: str, _: str = Depends(require_admin)) -> dict[str, Any]:
     return {"race": row_to_race(row), "entries": [row_to_entry(entry) for entry in entries]}
 
 
+@app.delete("/api/race-control/races/{race_id}")
+async def delete_race(race_id: str, _: str = Depends(require_admin)) -> dict[str, Any]:
+    if not fetch_one("SELECT race_id FROM races WHERE race_id = ?", (race_id,)):
+        raise HTTPException(status_code=404, detail="Race not found")
+    with db() as conn:
+        entry_ids = [row["entry_id"] for row in conn.execute("SELECT entry_id FROM entries WHERE race_id = ?", (race_id,)).fetchall()]
+        for entry_id in entry_ids:
+            conn.execute("DELETE FROM telemetry_packets WHERE entry_id = ?", (entry_id,))
+            conn.execute("DELETE FROM latest_telemetry WHERE entry_id = ?", (entry_id,))
+            conn.execute("DELETE FROM collector_sessions WHERE entry_id = ?", (entry_id,))
+            conn.execute("DELETE FROM team_sessions WHERE entry_id = ?", (entry_id,))
+        conn.execute("DELETE FROM entries WHERE race_id = ?", (race_id,))
+        conn.execute("DELETE FROM race_log WHERE race_id = ?", (race_id,))
+        conn.execute("DELETE FROM races WHERE race_id = ?", (race_id,))
+    await hub.broadcast(race_id)
+    return {"ok": True, "race_id": race_id}
+
+
 @app.patch("/api/race-control/races/{race_id}/status")
 async def update_race_status(race_id: str, payload: RaceStatusUpdate, _: str = Depends(require_admin)) -> dict[str, Any]:
     if not fetch_one("SELECT race_id FROM races WHERE race_id = ?", (race_id,)):
