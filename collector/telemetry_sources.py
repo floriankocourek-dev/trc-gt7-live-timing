@@ -27,6 +27,11 @@ class TelemetryPacket:
     position_x: float
     position_y: float
     position_z: float
+    tire_compound: str | None = None
+    tire_temp_fl: float | None = None
+    tire_temp_fr: float | None = None
+    tire_temp_rl: float | None = None
+    tire_temp_rr: float | None = None
     telemetry_status: str = "valid"
 
     def as_payload(self) -> dict:
@@ -45,6 +50,11 @@ class TelemetryPacket:
             "position_x": round(self.position_x, 2),
             "position_y": round(self.position_y, 2),
             "position_z": round(self.position_z, 2),
+            "tire_compound": self.tire_compound,
+            "tire_temp_fl": round(self.tire_temp_fl, 1) if self.tire_temp_fl is not None else None,
+            "tire_temp_fr": round(self.tire_temp_fr, 1) if self.tire_temp_fr is not None else None,
+            "tire_temp_rl": round(self.tire_temp_rl, 1) if self.tire_temp_rl is not None else None,
+            "tire_temp_rr": round(self.tire_temp_rr, 1) if self.tire_temp_rr is not None else None,
             "telemetry_status": self.telemetry_status,
         }
 
@@ -116,6 +126,11 @@ class MockTelemetrySource(TelemetrySource):
                 position_x=math.cos(phase) * 1800 + self.random.uniform(-6, 6),
                 position_y=20 + math.sin(phase * 3) * 3,
                 position_z=math.sin(phase) * 1800 + self.random.uniform(-6, 6),
+                tire_compound="Medium",
+                tire_temp_fl=82 + 8 * math.sin(phase * 2.0),
+                tire_temp_fr=83 + 8 * math.sin(phase * 2.0 + 0.2),
+                tire_temp_rl=78 + 6 * math.sin(phase * 1.7),
+                tire_temp_rr=79 + 6 * math.sin(phase * 1.7 + 0.2),
             )
             time.sleep(self.update_interval)
 
@@ -131,7 +146,7 @@ class GT7TelemetrySource(TelemetrySource):
         update_hz: float = 1.0,
         bind_port: int = 33740,
         heartbeat_port: int = 33739,
-        lap_display_offset: int = 1,
+        lap_display_offset: int = 0,
     ) -> None:
         self.playstation_ip = playstation_ip
         self.heartbeat_type = heartbeat_type
@@ -186,5 +201,10 @@ class GT7TelemetrySource(TelemetrySource):
                     position_x=packet.position_x,
                     position_y=packet.position_y,
                     position_z=packet.position_z,
+                    tire_compound=None,
+                    tire_temp_fl=packet.tire_temp_fl,
+                    tire_temp_fr=packet.tire_temp_fr,
+                    tire_temp_rl=packet.tire_temp_rl,
+                    tire_temp_rr=packet.tire_temp_rr,
                     telemetry_status=packet.telemetry_status,
                 )

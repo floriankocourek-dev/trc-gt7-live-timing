@@ -4,7 +4,6 @@ import {
   Activity,
   Gauge,
   KeyRound,
-  MonitorDot,
   Radio,
   Shield,
   Timer,
@@ -76,14 +75,41 @@ function App() {
 }
 
 function PublicTiming() {
-  const [raceId, setRaceId] = useState('TRC8H');
+  const [raceId, setRaceId] = useState(localStorage.getItem('publicRace') || '');
+  const [races, setRaces] = useState([]);
   const [standings, setStandings] = useState([]);
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
   const [classFilter, setClassFilter] = useState('all');
 
   useEffect(() => {
-    if (!raceId) return undefined;
+    let alive = true;
+    api('/api/public/races')
+      .then((data) => {
+        if (!alive) return;
+        setRaces(data);
+        const raceExists = data.some((race) => race.race_id === raceId);
+        if (!raceId && data.length) {
+          setRaceId(data[0].race_id);
+          localStorage.setItem('publicRace', data[0].race_id);
+        } else if (raceId && !raceExists) {
+          setRaceId(data[0]?.race_id || '');
+          if (data[0]) localStorage.setItem('publicRace', data[0].race_id);
+          else localStorage.removeItem('publicRace');
+        }
+      })
+      .catch((err) => alive && setError(err.message));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!raceId) {
+      setStandings([]);
+      setStatus('idle');
+      return undefined;
+    }
     let alive = true;
     setStatus('connecting');
     setError('');
@@ -113,7 +139,10 @@ function PublicTiming() {
       <div className="toolbar">
         <label>
           Race Code
-          <input value={raceId} onChange={(event) => setRaceId(event.target.value.toUpperCase())} />
+          <select value={raceId} onChange={(event) => { setRaceId(event.target.value); localStorage.setItem('publicRace', event.target.value); }}>
+            <option value="">Select race</option>
+            {races.map((race) => <option key={race.race_id} value={race.race_id}>{race.race_id} - {race.name}</option>)}
+          </select>
         </label>
         <label>
           Class
@@ -126,6 +155,7 @@ function PublicTiming() {
         <LiveBadge status={status} />
       </div>
       {error && <p className="notice error">{error}</p>}
+      {!races.length && <p className="notice">No races created yet.</p>}
       <StandingsTable rows={visibleRows} />
     </section>
   );
@@ -186,8 +216,8 @@ function StandingsTable({ rows }) {
 }
 
 function TeamEngineer() {
-  const [raceCode, setRaceCode] = useState(localStorage.getItem('teamRace') || 'TRC8H');
-  const [entryId, setEntryId] = useState(localStorage.getItem('teamEntry') || 'car_23');
+  const [raceCode, setRaceCode] = useState(localStorage.getItem('teamRace') || '');
+  const [entryId, setEntryId] = useState(localStorage.getItem('teamEntry') || '');
   const [teamCode, setTeamCode] = useState('');
   const [token, setToken] = useState(localStorage.getItem('teamToken') || '');
   const [state, setState] = useState(null);
@@ -281,6 +311,11 @@ function EngineerPanel({ state }) {
         <Metric label="RPM" value={fmt(state.rpm)} />
         <Metric label="Throttle" value={fmt(state.throttle, '%')} />
         <Metric label="Brake" value={fmt(state.brake, '%')} />
+        <Metric label="Tyre Compound" value={fmt(state.tire_compound)} />
+        <Metric label="Tyre FL" value={fmt(state.tire_temp_fl, ' C')} />
+        <Metric label="Tyre FR" value={fmt(state.tire_temp_fr, ' C')} />
+        <Metric label="Tyre RL" value={fmt(state.tire_temp_rl, ' C')} />
+        <Metric label="Tyre RR" value={fmt(state.tire_temp_rr, ' C')} />
         <Metric label="Stint" value={fmt(state.current_stint_laps, ' laps')} />
         <Metric label="Pit Stops" value={fmt(standing.pit_stops)} />
         <Metric label="Connection" value={fmt(state.connection_status)} />
@@ -293,7 +328,7 @@ function RaceControl() {
   const [password, setPassword] = useState('');
   const [token, setToken] = useState(localStorage.getItem('raceControlToken') || '');
   const [races, setRaces] = useState([]);
-  const [selectedRace, setSelectedRace] = useState(localStorage.getItem('selectedRace') || 'TRC8H');
+  const [selectedRace, setSelectedRace] = useState(localStorage.getItem('selectedRace') || '');
   const [raceDetail, setRaceDetail] = useState(null);
   const [standings, setStandings] = useState([]);
   const [collectors, setCollectors] = useState([]);
@@ -317,34 +352,31 @@ function RaceControl() {
     }
   }
 
-  async function seedDemo() {
-    setError('');
-    const data = await api('/api/dev/seed-demo', { method: 'POST', body: '{}' });
-    localStorage.setItem('raceControlToken', data.race_control_token);
-    localStorage.setItem('selectedRace', data.race_id);
-    setToken(data.race_control_token);
-    setSelectedRace(data.race_id);
-    setMessage(`Demo race ready. Codes: ${Object.entries(data.team_codes).map(([entry, code]) => `${entry} ${code}`).join(', ') || 'already existed'}`);
-  }
-
-  async function refresh() {
+  async function refresh(nextSelectedRace = selectedRace) {
     if (!token) return;
     try {
+      setError('');
       const raceList = await api('/api/race-control/races', { token });
       setRaces(raceList);
-      if (selectedRace) {
+      if (nextSelectedRace && raceList.some((race) => race.race_id === nextSelectedRace)) {
         const [detail, publicRows, collectorRows, privateRows, logRows] = await Promise.all([
-          api(`/api/race-control/races/${selectedRace}`, { token }),
-          api(`/api/public/races/${selectedRace}/standings`),
-          api(`/api/race-control/races/${selectedRace}/collectors`, { token }),
-          api(`/api/race-control/races/${selectedRace}/private`, { token }),
-          api(`/api/race-control/races/${selectedRace}/log`, { token }),
+          api(`/api/race-control/races/${nextSelectedRace}`, { token }),
+          api(`/api/public/races/${nextSelectedRace}/standings`),
+          api(`/api/race-control/races/${nextSelectedRace}/collectors`, { token }),
+          api(`/api/race-control/races/${nextSelectedRace}/private`, { token }),
+          api(`/api/race-control/races/${nextSelectedRace}/log`, { token }),
         ]);
         setRaceDetail(detail);
         setStandings(publicRows);
         setCollectors(collectorRows);
         setPrivateStates(privateRows);
         setLog(logRows);
+      } else {
+        setRaceDetail(null);
+        setStandings([]);
+        setCollectors([]);
+        setPrivateStates([]);
+        setLog([]);
       }
     } catch (err) {
       setError(err.message);
@@ -377,7 +409,6 @@ function RaceControl() {
           <label>Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="admin" /></label>
           <button type="submit"><Shield size={18} /> Login</button>
         </form>
-        <button className="secondary wide" onClick={seedDemo}><MonitorDot size={18} /> Create Demo Race</button>
         {error && <p className="notice error">{error}</p>}
       </section>
     );
@@ -393,14 +424,19 @@ function RaceControl() {
             {races.map((race) => <option key={race.race_id} value={race.race_id}>{race.race_id} - {race.name}</option>)}
           </select>
         </label>
-        <button onClick={refresh}><Activity size={18} /> Refresh</button>
+        <button onClick={() => refresh()}><Activity size={18} /> Refresh</button>
         <button className="secondary" onClick={() => { localStorage.removeItem('raceControlToken'); setToken(''); }}>Logout</button>
       </div>
       {message && <p className="notice good">{message}</p>}
       {error && <p className="notice error">{error}</p>}
 
       <div className="controlGrid">
-        <RaceForm token={token} onDone={refresh} />
+        <RaceForm token={token} onDone={(race) => {
+          setSelectedRace(race.race_id);
+          localStorage.setItem('selectedRace', race.race_id);
+          setMessage(`Race created: ${race.race_id}`);
+          refresh(race.race_id);
+        }} />
         <EntryForm token={token} raceId={selectedRace} onDone={(entry) => { setMessage(`Entry created. Team code for ${entry.entry_id}: ${entry.team_code}`); refresh(); }} />
       </div>
 
@@ -523,12 +559,12 @@ function RaceForm({ token, onDone }) {
 
   async function submit(event) {
     event.preventDefault();
-    await api('/api/race-control/races', {
+    const data = await api('/api/race-control/races', {
       token,
       method: 'POST',
       body: JSON.stringify({ ...form, duration_minutes: Number(form.duration_minutes), drivers_per_team: Number(form.drivers_per_team), classes: form.classes.split(',').map((x) => x.trim()).filter(Boolean) }),
     });
-    onDone();
+    onDone(data);
   }
 
   return (
@@ -583,7 +619,7 @@ function EntryForm({ token, raceId, onDone }) {
       <label>Class<input value={form.car_class} onChange={(e) => setForm({ ...form, car_class: e.target.value })} /></label>
       <label>Drivers<input value={form.drivers} onChange={(e) => setForm({ ...form, drivers: e.target.value })} /></label>
       <label>Team Code<input value={form.team_code} onChange={(e) => setForm({ ...form, team_code: e.target.value })} placeholder="empty = auto" /></label>
-      <button type="submit">Create Entry</button>
+      <button type="submit" disabled={!raceId}>Create Entry</button>
     </form>
   );
 }
@@ -628,7 +664,7 @@ function PrivateTelemetryTable({ rows }) {
   return (
     <div className="tableFrame">
       <table>
-        <thead><tr><th>Car</th><th>Fuel</th><th>Fuel/Lap</th><th>Remain</th><th>Speed</th><th>Gear</th><th>RPM</th><th>Throttle</th><th>Brake</th><th>Conn</th></tr></thead>
+        <thead><tr><th>Car</th><th>Fuel</th><th>Fuel/Lap</th><th>Remain</th><th>Speed</th><th>Gear</th><th>RPM</th><th>Throttle</th><th>Brake</th><th>Tyres</th><th>Temps</th><th>Conn</th></tr></thead>
         <tbody>
           {rows.map((row) => (
             <tr key={row.entry.entry_id}>
@@ -641,14 +677,22 @@ function PrivateTelemetryTable({ rows }) {
               <td>{fmt(row.rpm)}</td>
               <td>{fmt(row.throttle, '%')}</td>
               <td>{fmt(row.brake, '%')}</td>
+              <td>{fmt(row.tire_compound)}</td>
+              <td>{formatTyres(row)}</td>
               <td><StatusPill value={row.connection_status} /></td>
             </tr>
           ))}
-          {!rows.length && <tr><td colSpan="10" className="empty">No private telemetry yet.</td></tr>}
+          {!rows.length && <tr><td colSpan="12" className="empty">No private telemetry yet.</td></tr>}
         </tbody>
       </table>
     </div>
   );
+}
+
+function formatTyres(row) {
+  const values = [row.tire_temp_fl, row.tire_temp_fr, row.tire_temp_rl, row.tire_temp_rr];
+  if (values.every((value) => value === null || value === undefined || value === '')) return '-';
+  return `FL ${fmt(row.tire_temp_fl, ' C')} / FR ${fmt(row.tire_temp_fr, ' C')} / RL ${fmt(row.tire_temp_rl, ' C')} / RR ${fmt(row.tire_temp_rr, ' C')}`;
 }
 
 function Metric({ label, value }) {

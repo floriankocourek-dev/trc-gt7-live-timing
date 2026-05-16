@@ -146,7 +146,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--heartbeat-type", default="A", choices=["A", "B", "~"], help="GT7 heartbeat type")
     parser.add_argument("--bind-port", type=int, default=33740, help="Local UDP receive port for GT7 telemetry")
     parser.add_argument("--heartbeat-port", type=int, default=33739, help="PlayStation UDP heartbeat port")
-    parser.add_argument("--lap-display-offset", type=int, default=1, help="Added to GT7 lap count for live current-lap display")
+    parser.add_argument("--lap-display-offset", type=int, default=0, help="Added to GT7 lap count for live current-lap display")
     parser.add_argument("--start-lap", type=int, default=1)
     parser.add_argument("--base-lap-seconds", type=float, default=505.0)
     parser.add_argument("--fuel-liters", type=float, default=100.0)

@@ -47,6 +47,10 @@ class GT7Packet:
     engine_rpm: float
     fuel_level: float
     fuel_capacity: float
+    tire_temp_fl: float | None
+    tire_temp_fr: float | None
+    tire_temp_rl: float | None
+    tire_temp_rr: float | None
     throttle_raw: int
     brake_raw: int
     current_gear: int | None
@@ -175,6 +179,10 @@ def parse_gt7_packet(plain: bytes) -> GT7Packet:
         engine_rpm=f32(0x3C),
         fuel_level=f32(0x44),
         fuel_capacity=f32(0x48),
+        tire_temp_fl=f32(0x60),
+        tire_temp_fr=f32(0x64),
+        tire_temp_rl=f32(0x68),
+        tire_temp_rr=f32(0x6C),
         throttle_raw=u8(0x91),
         brake_raw=u8(0x92),
         current_gear=current_gear,
@@ -200,6 +208,10 @@ def make_fake_plain_packet(
     struct.pack_into("<f", packet, 0x44, fuel_liters)
     struct.pack_into("<f", packet, 0x48, 100.0)
     struct.pack_into("<f", packet, 0x4C, speed_mps)
+    struct.pack_into("<f", packet, 0x60, 82.0)
+    struct.pack_into("<f", packet, 0x64, 83.0)
+    struct.pack_into("<f", packet, 0x68, 78.0)
+    struct.pack_into("<f", packet, 0x6C, 79.0)
     struct.pack_into("<I", packet, 0x70, 42)
     struct.pack_into("<H", packet, 0x74, lap)
     struct.pack_into("<H", packet, 0x76, 50)
