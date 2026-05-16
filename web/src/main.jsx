@@ -180,7 +180,8 @@ function TrackMap({ trackMap, focusEntryId }) {
   const width = 1000;
   const height = 560;
   const points = trackMap.points || [];
-  const polyline = points.map((point) => `${point.x * width},${height - point.y * height}`).join(' ');
+  const linePoints = points.length > 2 ? [...points, points[0]] : points;
+  const polyline = linePoints.map((point) => `${point.x * width},${height - point.y * height}`).join(' ');
   const visibleCars = focusEntryId ? (trackMap.cars || []).filter((car) => car.entry_id === focusEntryId) : (trackMap.cars || []);
 
   return (

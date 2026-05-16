@@ -28,7 +28,8 @@ ONLINE_WINDOW_SECONDS = 10
 REFERENCE_LAP_SECONDS = 500
 PIT_FUEL_INCREASE_LITERS = 1.0
 PIT_EXIT_SPEED_KMH = 90.0
-MIN_REFERENCE_POINTS = 20
+MIN_REFERENCE_POINTS = 120
+REFERENCE_CLOSE_DISTANCE_RATIO = 0.08
 
 
 def now_iso() -> str:
@@ -469,6 +470,18 @@ def track_bounds(points: list[dict[str, Any]]) -> dict[str, float]:
     return {"min_x": min(xs), "max_x": max(xs), "min_z": min(zs), "max_z": max(zs)}
 
 
+def track_diagonal(bounds: dict[str, float]) -> float:
+    return ((bounds["max_x"] - bounds["min_x"]) ** 2 + (bounds["max_z"] - bounds["min_z"]) ** 2) ** 0.5
+
+
+def reference_lap_is_complete(points: list[dict[str, Any]]) -> bool:
+    if len(points) < MIN_REFERENCE_POINTS:
+        return False
+    bounds = track_bounds(points)
+    max_close_distance = max(50.0, track_diagonal(bounds) * REFERENCE_CLOSE_DISTANCE_RATIO)
+    return point_distance(points[0], points[-1]) <= max_close_distance
+
+
 def normalize_track_point(point: dict[str, Any], bounds: dict[str, float]) -> dict[str, float]:
     width = max(bounds["max_x"] - bounds["min_x"], 1.0)
     height = max(bounds["max_z"] - bounds["min_z"], 1.0)
@@ -508,8 +521,16 @@ def update_track_reference(conn: sqlite3.Connection, session: sqlite3.Row, paylo
     point = track_point(payload, received_at)
     if not point:
         return
-    if conn.execute("SELECT race_id FROM track_references WHERE race_id = ? AND status = 'active'", (session["race_id"],)).fetchone():
-        return
+    active_reference = conn.execute("SELECT * FROM track_references WHERE race_id = ? AND status = 'active'", (session["race_id"],)).fetchone()
+    if active_reference:
+        active_points = json.loads(active_reference["points_json"])
+        if reference_lap_is_complete(active_points):
+            return
+        conn.execute("DELETE FROM track_references WHERE race_id = ?", (session["race_id"],))
+        conn.execute(
+            "INSERT INTO race_log (race_id, entry_id, level, message, created_at) VALUES (?, ?, ?, ?, ?)",
+            (session["race_id"], session["entry_id"], "warning", "Trackmap reference was incomplete and has been reset", received_at),
+        )
 
     buffer = conn.execute("SELECT * FROM track_lap_buffers WHERE entry_id = ?", (session["entry_id"],)).fetchone()
     if not buffer:
@@ -529,7 +550,9 @@ def update_track_reference(conn: sqlite3.Connection, session: sqlite3.Row, paylo
             )
         return
 
-    if payload.lap > buffer["lap"] and len(points) >= MIN_REFERENCE_POINTS:
+    if payload.lap > buffer["lap"] and reference_lap_is_complete(points):
+        if point_distance(points[0], points[-1]) > 0:
+            points.append(points[0])
         bounds = track_bounds(points)
         conn.execute(
             """
@@ -548,6 +571,17 @@ def update_track_reference(conn: sqlite3.Connection, session: sqlite3.Row, paylo
         conn.execute(
             "INSERT INTO race_log (race_id, entry_id, level, message, created_at) VALUES (?, ?, ?, ?, ?)",
             (session["race_id"], session["entry_id"], "info", f"Trackmap reference lap recorded from {session['entry_id']} lap {buffer['lap']}", received_at),
+        )
+    elif payload.lap > buffer["lap"] and len(points) >= MIN_REFERENCE_POINTS:
+        conn.execute(
+            "INSERT INTO race_log (race_id, entry_id, level, message, created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                session["race_id"],
+                session["entry_id"],
+                "warning",
+                f"Trackmap rejected incomplete reference from {session['entry_id']} lap {buffer['lap']} ({len(points)} points)",
+                received_at,
+            ),
         )
 
     conn.execute(
@@ -652,6 +686,9 @@ def trackmap_for_race(race_id: str) -> dict[str, Any]:
         """,
         (race_id,),
     )
+    if reference and not reference_lap_is_complete(json.loads(reference["points_json"])):
+        reference = None
+
     if not reference:
         buffers = fetch_all("SELECT entry_id, lap, points_json FROM track_lap_buffers WHERE race_id = ?", (race_id,))
         return {
