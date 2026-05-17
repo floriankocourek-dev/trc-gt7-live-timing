@@ -47,6 +47,11 @@ async function api(path, options = {}) {
 function App() {
   const [view, setView] = useState('public');
   const [publicRaceId, setPublicRaceId] = useState(localStorage.getItem('publicRace') || '');
+  const updatePublicRaceId = (raceId) => {
+    setPublicRaceId(raceId);
+    if (raceId) localStorage.setItem('publicRace', raceId);
+    else localStorage.removeItem('publicRace');
+  };
 
   return (
     <main className="shell">
@@ -68,7 +73,7 @@ function App() {
         </nav>
       </header>
 
-      {view === 'public' && <PublicTiming raceId={publicRaceId} setRaceId={setPublicRaceId} />}
+      {view === 'public' && <PublicTiming raceId={publicRaceId} setRaceId={updatePublicRaceId} />}
       {view === 'team' && <TeamEngineer />}
       {view === 'control' && <RaceControl />}
     </main>
@@ -91,13 +96,8 @@ function PublicTiming({ raceId, setRaceId }) {
         if (!alive) return;
         setRaces(data);
         const raceExists = data.some((race) => race.race_id === raceId);
-        if (!raceId && data.length) {
-          setRaceId(data[0].race_id);
-          localStorage.setItem('publicRace', data[0].race_id);
-        } else if (raceId && !raceExists) {
-          setRaceId(data[0]?.race_id || '');
-          if (data[0]) localStorage.setItem('publicRace', data[0].race_id);
-          else localStorage.removeItem('publicRace');
+        if (raceId && !raceExists) {
+          setRaceId('');
         }
       })
       .catch((err) => alive && setError(err.message));
@@ -151,7 +151,7 @@ function PublicTiming({ raceId, setRaceId }) {
       <div className="toolbar">
         <label>
           Race Code
-          <select value={raceId} onChange={(event) => { setRaceId(event.target.value); localStorage.setItem('publicRace', event.target.value); }}>
+          <select value={raceId} onChange={(event) => setRaceId(event.target.value)}>
             <option value="">Select race</option>
             {races.map((race) => <option key={race.race_id} value={race.race_id}>{race.race_id} - {race.name}</option>)}
           </select>
@@ -181,7 +181,9 @@ function TrackMap({ trackMap, focusEntryId }) {
   const height = 560;
   const points = trackMap.points || [];
   const linePoints = points.length > 2 ? [...points, points[0]] : points;
-  const polyline = linePoints.map((point) => `${point.x * width},${height - point.y * height}`).join(' ');
+  const toScreenX = (x) => width - x * width;
+  const toScreenY = (y) => height - y * height;
+  const polyline = linePoints.map((point) => `${toScreenX(point.x)},${toScreenY(point.y)}`).join(' ');
   const visibleCars = focusEntryId ? (trackMap.cars || []).filter((car) => car.entry_id === focusEntryId) : (trackMap.cars || []);
 
   return (
@@ -209,8 +211,8 @@ function TrackMap({ trackMap, focusEntryId }) {
           <polyline className="trackLineShadow" points={polyline} />
           <polyline className="trackLine" points={polyline} />
           {visibleCars.map((car) => {
-            const x = car.x * width;
-            const y = height - car.y * height;
+            const x = toScreenX(car.x);
+            const y = toScreenY(car.y);
             return (
               <g key={car.entry_id} className={`carMarker ${car.connection_status}`}>
                 <circle cx={x} cy={y} r="13" />
@@ -641,13 +643,13 @@ function EntryRow({ entry, token, onDone, onMessage }) {
 
 function RaceForm({ token, onDone }) {
   const [form, setForm] = useState({
-    race_id: 'TRC8H',
-    name: 'TRC 8H Nurburgring',
-    track_id: 'nurburgring_24h',
-    duration_minutes: 480,
+    race_id: '',
+    name: '',
+    track_id: '',
+    duration_minutes: '',
     event_type: 'team',
-    drivers_per_team: 2,
-    classes: 'GT3 Pro, GT3 Am',
+    drivers_per_team: '',
+    classes: '',
   });
 
   async function submit(event) {
@@ -655,7 +657,12 @@ function RaceForm({ token, onDone }) {
     const data = await api('/api/race-control/races', {
       token,
       method: 'POST',
-      body: JSON.stringify({ ...form, duration_minutes: Number(form.duration_minutes), drivers_per_team: Number(form.drivers_per_team), classes: form.classes.split(',').map((x) => x.trim()).filter(Boolean) }),
+      body: JSON.stringify({
+        ...form,
+        duration_minutes: Number(form.duration_minutes),
+        drivers_per_team: Number(form.drivers_per_team),
+        classes: form.classes.split(',').map((x) => x.trim()).filter(Boolean),
+      }),
     });
     onDone(data);
   }
@@ -663,13 +670,13 @@ function RaceForm({ token, onDone }) {
   return (
     <form className="panel formGrid" onSubmit={submit}>
       <h2>Create Race</h2>
-      <label>Race Code<input value={form.race_id} onChange={(e) => setForm({ ...form, race_id: e.target.value.toUpperCase() })} /></label>
-      <label>Name<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
-      <label>Track<input value={form.track_id} onChange={(e) => setForm({ ...form, track_id: e.target.value })} /></label>
-      <label>Duration<input type="number" value={form.duration_minutes} onChange={(e) => setForm({ ...form, duration_minutes: e.target.value })} /></label>
+      <label>Race Code<input value={form.race_id} placeholder="for example: TRC8H" onChange={(e) => setForm({ ...form, race_id: e.target.value.toUpperCase() })} /></label>
+      <label>Name<input value={form.name} placeholder="for example: TRC 8H Nurburgring" onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
+      <label>Track<input value={form.track_id} placeholder="for example: nurburgring_24h" onChange={(e) => setForm({ ...form, track_id: e.target.value })} /></label>
+      <label>Duration<input type="number" value={form.duration_minutes} placeholder="for example: 480" onChange={(e) => setForm({ ...form, duration_minutes: e.target.value })} /></label>
       <label>Event Type<select value={form.event_type} onChange={(e) => setForm({ ...form, event_type: e.target.value })}><option value="solo">Solo</option><option value="team">Team</option></select></label>
-      <label>Drivers / Team<input type="number" value={form.drivers_per_team} onChange={(e) => setForm({ ...form, drivers_per_team: e.target.value })} /></label>
-      <label>Classes<input value={form.classes} onChange={(e) => setForm({ ...form, classes: e.target.value })} /></label>
+      <label>Drivers / Team<input type="number" value={form.drivers_per_team} placeholder="for example: 2" onChange={(e) => setForm({ ...form, drivers_per_team: e.target.value })} /></label>
+      <label>Classes<input value={form.classes} placeholder="for example: GT3 Pro, GT3 Am" onChange={(e) => setForm({ ...form, classes: e.target.value })} /></label>
       <button type="submit">Create Race</button>
     </form>
   );
@@ -677,11 +684,11 @@ function RaceForm({ token, onDone }) {
 
 function EntryForm({ token, raceId, onDone }) {
   const [form, setForm] = useState({
-    car_number: 23,
-    team_name: 'HERKA Racing',
-    car_model: 'BMW M4 GT3',
-    car_class: 'GT3 Pro',
-    drivers: 'florian:Florian, veronika:Veronika',
+    car_number: '',
+    team_name: '',
+    car_model: '',
+    car_class: '',
+    drivers: '',
     team_code: '',
   });
 
@@ -706,12 +713,12 @@ function EntryForm({ token, raceId, onDone }) {
   return (
     <form className="panel formGrid" onSubmit={submit}>
       <h2>Create Entry</h2>
-      <label>Car Number<input type="number" value={form.car_number} onChange={(e) => setForm({ ...form, car_number: e.target.value })} /></label>
-      <label>Team Name<input value={form.team_name} onChange={(e) => setForm({ ...form, team_name: e.target.value })} /></label>
-      <label>Car Model<input value={form.car_model} onChange={(e) => setForm({ ...form, car_model: e.target.value })} /></label>
-      <label>Class<input value={form.car_class} onChange={(e) => setForm({ ...form, car_class: e.target.value })} /></label>
-      <label>Drivers<input value={form.drivers} onChange={(e) => setForm({ ...form, drivers: e.target.value })} /></label>
-      <label>Team Code<input value={form.team_code} onChange={(e) => setForm({ ...form, team_code: e.target.value })} placeholder="empty = auto" /></label>
+      <label>Car Number<input type="number" value={form.car_number} placeholder="for example: 23" onChange={(e) => setForm({ ...form, car_number: e.target.value })} /></label>
+      <label>Team Name<input value={form.team_name} placeholder="for example: HERKA Racing" onChange={(e) => setForm({ ...form, team_name: e.target.value })} /></label>
+      <label>Car Model<input value={form.car_model} placeholder="for example: BMW M4 GT3" onChange={(e) => setForm({ ...form, car_model: e.target.value })} /></label>
+      <label>Class<input value={form.car_class} placeholder="for example: GT3 Pro" onChange={(e) => setForm({ ...form, car_class: e.target.value })} /></label>
+      <label>Drivers<input value={form.drivers} placeholder="for example: florian:Florian, veronika:Veronika" onChange={(e) => setForm({ ...form, drivers: e.target.value })} /></label>
+      <label>Team Code<input value={form.team_code} onChange={(e) => setForm({ ...form, team_code: e.target.value })} placeholder="for example: empty = auto" /></label>
       <button type="submit" disabled={!raceId}>Create Entry</button>
     </form>
   );
