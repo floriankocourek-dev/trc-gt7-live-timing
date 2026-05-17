@@ -1,0 +1,28 @@
+name: TRCGT7Collector
+options:
+  bundleIdPrefix: com.trc
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: 5.10
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+targets:
+  TRCGT7Collector:
+    type: application
+    platform: iOS
+    sources:
+      - GT7Collector
+    info:
+      path: GT7Collector/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: TRC GT7 Collector
+        UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: This app receives GT7 telemetry from your PlayStation on your local network and sends selected race telemetry to the timing server.
+        NSBonjourServices:
+          - _http._tcp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.trc.gt7collector
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
