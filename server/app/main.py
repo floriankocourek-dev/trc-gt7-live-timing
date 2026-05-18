@@ -672,6 +672,7 @@ def compute_standings(race_id: str) -> list[dict[str, Any]]:
                 "lap_progress": row["lap_progress"],
                 "gap_to_leader": gap_to_leader,
                 "gap_to_ahead": gap_to_ahead,
+                "gap_to_behind": None,
                 "last_lap_ms": row["last_lap_ms"],
                 "best_lap_ms": row["best_lap_ms"],
                 "pit_status": row["pit_status"] if latest_present else "offline",
@@ -682,6 +683,9 @@ def compute_standings(race_id: str) -> list[dict[str, Any]]:
             }
         )
         previous_progress = progress
+    for index, standing in enumerate(standings):
+        if index + 1 < len(standings):
+            standing["gap_to_behind"] = standings[index + 1]["gap_to_ahead"]
     return standings
 
 
@@ -772,6 +776,7 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
 
     fuel_per_lap = None
     estimated_laps_remaining = None
+    fuel_for_this_lap = None
     current_stint_laps = 0
     history = fetch_all(
         """
@@ -790,9 +795,17 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
             fuel_per_lap = round(fuel_delta / lap_delta, 2)
             if latest and latest["fuel_liters"] is not None:
                 estimated_laps_remaining = round(latest["fuel_liters"] / fuel_per_lap, 1)
+                latest_progress = latest["lap_progress"] if latest["lap_progress"] is not None else 0
+                remaining_progress = max(0.0, min(1.0, 1.0 - float(latest_progress)))
+                fuel_for_this_lap = round(fuel_per_lap * remaining_progress, 2)
             current_stint_laps = lap_delta
 
     latest_dict = dict(latest) if latest else {}
+    gt7_telemetry = json.loads(latest_dict["gt7_telemetry_json"]) if latest_dict.get("gt7_telemetry_json") else None
+    top_speed_row = fetch_one(
+        "SELECT MAX(speed_kmh) AS top_speed_kmh FROM telemetry_packets WHERE entry_id = ? AND speed_kmh IS NOT NULL",
+        (entry_id,),
+    )
     trackmap = trackmap_for_race(entry["race_id"])
     if trackmap["status"] == "active":
         trackmap = {
@@ -806,7 +819,10 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
         "fuel_liters": latest_dict.get("fuel_liters"),
         "fuel_per_lap": fuel_per_lap,
         "estimated_laps_remaining": estimated_laps_remaining,
+        "fuel_for_this_lap": fuel_for_this_lap,
         "speed_kmh": latest_dict.get("speed_kmh"),
+        "top_speed_kmh": round(top_speed_row["top_speed_kmh"], 1) if top_speed_row and top_speed_row["top_speed_kmh"] is not None else None,
+        "total_laps": gt7_telemetry.get("total_laps") if isinstance(gt7_telemetry, dict) else None,
         "gear": latest_dict.get("gear"),
         "rpm": latest_dict.get("rpm"),
         "throttle": latest_dict.get("throttle"),
@@ -819,7 +835,7 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
         "tire_temp_fr": latest_dict.get("tire_temp_fr"),
         "tire_temp_rl": latest_dict.get("tire_temp_rl"),
         "tire_temp_rr": latest_dict.get("tire_temp_rr"),
-        "gt7_telemetry": json.loads(latest_dict["gt7_telemetry_json"]) if latest_dict.get("gt7_telemetry_json") else None,
+        "gt7_telemetry": gt7_telemetry,
         "current_stint_laps": current_stint_laps,
         "last_seen": latest_dict.get("received_at"),
         "connection_status": connection_status(latest),

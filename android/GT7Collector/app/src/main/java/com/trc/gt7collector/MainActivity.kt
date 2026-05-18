@@ -1,7 +1,14 @@
 package com.trc.gt7collector
 
+import android.Manifest
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.view.View
@@ -18,9 +25,23 @@ import android.widget.AdapterView
 class MainActivity : Activity() {
     private val api = TimingApi()
     private var entries: List<EntryInfo> = emptyList()
-    private var collectorToken: String? = null
-    private var udpCollector: GT7UdpCollector? = null
-    private var activeServerUrl = DEFAULT_SERVER_URL
+    private var isSending = false
+    private val statusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                CollectorService.ACTION_STATUS -> {
+                    val label = intent.getStringExtra(CollectorService.EXTRA_STATUS_LABEL).orEmpty()
+                    val value = intent.getStringExtra(CollectorService.EXTRA_STATUS_VALUE).orEmpty()
+                    updateStatusFromService(label, value)
+                }
+                CollectorService.ACTION_MESSAGE -> {
+                    val message = intent.getStringExtra(CollectorService.EXTRA_MESSAGE).orEmpty()
+                    val isError = intent.getBooleanExtra(CollectorService.EXTRA_IS_ERROR, false)
+                    showMessage(message, isError)
+                }
+            }
+        }
+    }
 
     private lateinit var serverInput: EditText
     private lateinit var raceInput: EditText
@@ -39,12 +60,27 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        requestNotificationPermission()
         buildUi()
     }
 
-    override fun onDestroy() {
-        stopSending()
-        super.onDestroy()
+    override fun onStart() {
+        super.onStart()
+        val filter = IntentFilter().apply {
+            addAction(CollectorService.ACTION_STATUS)
+            addAction(CollectorService.ACTION_MESSAGE)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(statusReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(statusReceiver, filter)
+        }
+    }
+
+    override fun onStop() {
+        unregisterReceiver(statusReceiver)
+        super.onStop()
     }
 
     private fun buildUi() {
@@ -184,63 +220,57 @@ class MainActivity : Activity() {
 
         startButton.isEnabled = false
         stopButton.isEnabled = true
-        activeServerUrl = serverUrl
-        Thread {
-            try {
-                collectorToken = api.register(
-                    serverUrl = serverUrl,
-                    raceCode = raceCode,
-                    entryId = entry.entryId,
-                    teamCode = pin,
-                    driverId = driver.driverId
-                )
-                runOnUiThread {
-                    setStatus(serverStatus, "OK")
-                    setStatus(sendingStatus, "YES")
-                    setStatus(lastPacket, "waiting for GT7 packet...")
-                    showMessage("Collector is sending selected telemetry to the timing server.", false)
-                }
+        isSending = true
+        setStatus(serverStatus, "loading")
+        setStatus(sendingStatus, "YES")
+        setStatus(lastPacket, "waiting for GT7 packet...")
+        showMessage("Collector runs in the background until you press Stop.", false)
 
-                udpCollector = GT7UdpCollector(
-                    playStationIp = ps5Ip,
-                    onPayload = { payload -> sendTelemetry(payload) },
-                    onStatus = { value -> runOnUiThread { setStatus(gt7Status, value) } },
-                    onError = { message -> runOnUiThread { showMessage(message, true) } }
-                ).also { it.start() }
-            } catch (error: Exception) {
-                runOnUiThread {
-                    showMessage(friendly(error), true)
-                    stopSending()
-                }
-            }
-        }.start()
-    }
-
-    private fun sendTelemetry(payload: TelemetryPayload) {
-        val token = collectorToken ?: return
-        try {
-            api.sendTelemetry(activeServerUrl, token, payload)
-            runOnUiThread {
-                setStatus(serverStatus, "OK")
-                setStatus(sendingStatus, "YES")
-                setStatus(lastPacket, "lap=${payload.lap} speed=${payload.speedKmh.toInt()}km/h fuel=${"%.1f".format(payload.fuelLiters)}L")
-            }
-        } catch (_: Exception) {
-            runOnUiThread {
-                setStatus(serverStatus, "not connected")
-                showMessage("Connection to timing server lost. The app will keep trying while it is open.", true)
-            }
+        val intent = Intent(this, CollectorService::class.java).apply {
+            action = CollectorService.ACTION_START
+            putExtra(CollectorService.EXTRA_SERVER_URL, serverUrl)
+            putExtra(CollectorService.EXTRA_RACE_CODE, raceCode)
+            putExtra(CollectorService.EXTRA_ENTRY_ID, entry.entryId)
+            putExtra(CollectorService.EXTRA_TEAM_CODE, pin)
+            putExtra(CollectorService.EXTRA_DRIVER_ID, driver.driverId)
+            putExtra(CollectorService.EXTRA_PS5_IP, ps5Ip)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
         }
     }
 
     private fun stopSending() {
-        udpCollector?.stop()
-        udpCollector = null
-        collectorToken = null
+        isSending = false
+        stopService(Intent(this, CollectorService::class.java).setAction(CollectorService.ACTION_STOP))
         setStatus(gt7Status, "not connected")
         setStatus(sendingStatus, "NO")
         if (::startButton.isInitialized) startButton.isEnabled = true
         if (::stopButton.isInitialized) stopButton.isEnabled = false
+    }
+
+    private fun updateStatusFromService(label: String, value: String) {
+        when (label) {
+            "GT7 connection" -> setStatus(gt7Status, value)
+            "Server connection" -> setStatus(serverStatus, value)
+            "Sending data" -> {
+                setStatus(sendingStatus, value)
+                isSending = value.equals("YES", ignoreCase = true)
+                startButton.isEnabled = !isSending
+                stopButton.isEnabled = isSending
+            }
+            "Last packet" -> setStatus(lastPacket, value)
+        }
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2381)
+        }
     }
 
     private fun selectedEntry(): EntryInfo? =

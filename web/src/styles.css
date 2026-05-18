@@ -406,6 +406,10 @@ tr:hover td {
   gap: 10px;
 }
 
+.engineerMetricGrid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
 .telemetryGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -431,7 +435,8 @@ tr:hover td {
 }
 
 .metric strong {
-  font-size: 22px;
+  font-size: 20px;
+  overflow-wrap: anywhere;
 }
 
 .logList {
@@ -501,6 +506,7 @@ tr:hover td {
   .controlGrid,
   .entryRow,
   .metricGrid,
+  .engineerMetricGrid,
   .telemetryGrid {
     grid-template-columns: 1fr;
   }

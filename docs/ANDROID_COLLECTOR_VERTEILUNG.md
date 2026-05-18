@@ -5,7 +5,7 @@
 Die installierbare Android-App liegt hier:
 
 ```text
-C:\Users\Florian\Desktop\TRC Live Tracking\Android App zum Verteilen\AN FREUNDE SENDEN\TRC-GT7-Collector-Android-v0.1.0.apk
+C:\Users\Florian\Desktop\TRC Live Tracking\Android App zum Verteilen\AN FREUNDE SENDEN\TRC-GT7-Collector-Android-v0.1.1.apk
 ```
 
 Diese eine Datei kannst du per Discord verschicken.
@@ -52,6 +52,6 @@ Die App braucht nur Netzwerkrechte. Sie greift nicht auf Mikrofon, Kamera, Bilds
 Aktuelle APK:
 
 ```text
-TRC-GT7-Collector-Android-v0.1.0.apk
-SHA256: 68AE836EAF094B1C5646CD1C360AF21A9378E130ABBEF37FFFAAE5DEBF70AE1D
+TRC-GT7-Collector-Android-v0.1.1.apk
+SHA256: 8635B113AD0E7D8D7B1735108316C43B188A5309B37FACE83A0E474CD4A487A3
 ```

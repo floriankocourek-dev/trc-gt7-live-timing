@@ -28,6 +28,13 @@ function fmt(value, suffix = '') {
   return `${value}${suffix}`;
 }
 
+function fmtFixed(value, digits = 1, suffix = '') {
+  if (value === null || value === undefined || value === '') return '-';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fmt(value, suffix);
+  return `${number.toFixed(digits)}${suffix}`;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -57,7 +64,7 @@ function App() {
     <main className="shell">
       <header className="topbar">
         <div>
-          <div className="eyebrow">TRC GT7</div>
+          <div className="eyebrow">THE RACING CLUB</div>
           <h1>Live Timing Control</h1>
         </div>
         <nav className="nav">
@@ -179,10 +186,11 @@ function TrackMap({ trackMap, focusEntryId }) {
   if (!trackMap) return null;
   const width = 1000;
   const height = 560;
+  const padding = 56;
   const points = trackMap.points || [];
   const linePoints = points.length > 2 ? [...points, points[0]] : points;
-  const toScreenX = (x) => width - x * width;
-  const toScreenY = (y) => height - y * height;
+  const toScreenX = (x) => padding + (1 - x) * (width - padding * 2);
+  const toScreenY = (y) => padding + (1 - y) * (height - padding * 2);
   const polyline = linePoints.map((point) => `${toScreenX(point.x)},${toScreenY(point.y)}`).join(' ');
   const visibleCars = focusEntryId ? (trackMap.cars || []).filter((car) => car.entry_id === focusEntryId) : (trackMap.cars || []);
 
@@ -380,27 +388,32 @@ function EngineerPanel({ state }) {
         <div className="rankBox">P{fmt(standing.position)}</div>
       </div>
 
-      <div className="metricGrid">
+      <div className="metricGrid engineerMetricGrid">
         <Metric label="Gap Ahead" value={fmt(standing.gap_to_ahead)} />
-        <Metric label="Current Lap" value={fmt(standing.laps)} />
+        <Metric label="Gap Behind" value={fmt(standing.gap_to_behind)} />
         <Metric label="Last Lap" value={formatMs(standing.last_lap_ms)} />
         <Metric label="Best Lap" value={formatMs(standing.best_lap_ms)} />
-        <Metric label="Fuel" value={fmt(state.fuel_liters, ' L')} />
-        <Metric label="Fuel / Lap" value={fmt(state.fuel_per_lap, ' L')} />
-        <Metric label="Laps Remaining" value={fmt(state.estimated_laps_remaining)} />
-        <Metric label="Speed" value={fmt(state.speed_kmh, ' km/h')} />
-        <Metric label="Gear" value={fmt(state.gear)} />
-        <Metric label="RPM" value={fmt(state.rpm)} />
-        <Metric label="Throttle" value={fmt(state.throttle, '%')} />
-        <Metric label="Brake" value={fmt(state.brake, '%')} />
-        <Metric label="Tyre Compound" value={fmt(state.tire_compound)} />
-        <Metric label="Tyre FL" value={fmt(state.tire_temp_fl, ' C')} />
-        <Metric label="Tyre FR" value={fmt(state.tire_temp_fr, ' C')} />
-        <Metric label="Tyre RL" value={fmt(state.tire_temp_rl, ' C')} />
-        <Metric label="Tyre RR" value={fmt(state.tire_temp_rr, ' C')} />
+        <Metric label="Current Lap" value={fmt(standing.laps)} />
+        <Metric label="Total Laps" value={fmt(state.total_laps)} />
+
+        <Metric label="Fuel" value={fmtFixed(state.fuel_liters, 2, ' L')} />
+        <Metric label="Fuel / Lap" value={fmtFixed(state.fuel_per_lap, 2, ' L')} />
+        <Metric label="Laps Remaining" value={fmtFixed(state.estimated_laps_remaining, 1)} />
+        <Metric label="Fuel For This Lap" value={fmtFixed(state.fuel_for_this_lap, 2, ' L')} />
         <Metric label="Stint" value={fmt(state.current_stint_laps, ' laps')} />
         <Metric label="Pit Stops" value={fmt(standing.pit_stops)} />
+
+        <Metric label="Live Speed" value={fmtFixed(state.speed_kmh, 1, ' km/h')} />
+        <Metric label="Top Speed" value={fmtFixed(state.top_speed_kmh, 1, ' km/h')} />
+        <Metric label="Gear" value={fmt(state.gear)} />
+        <Metric label="Throttle" value={fmt(state.throttle, '%')} />
+        <Metric label="Brake" value={fmt(state.brake, '%')} />
         <Metric label="Connection" value={fmt(state.connection_status)} />
+
+        <Metric label="Tyre FL" value={fmtFixed(state.tire_temp_fl, 1, ' C')} />
+        <Metric label="Tyre FR" value={fmtFixed(state.tire_temp_fr, 1, ' C')} />
+        <Metric label="Tyre RL" value={fmtFixed(state.tire_temp_rl, 1, ' C')} />
+        <Metric label="Tyre RR" value={fmtFixed(state.tire_temp_rr, 1, ' C')} />
       </div>
 
       <TrackMap trackMap={state.trackmap} focusEntryId={entry.entry_id} />
