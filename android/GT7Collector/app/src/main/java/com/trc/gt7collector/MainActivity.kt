@@ -268,7 +268,7 @@ class MainActivity : Activity() {
     private fun input(hint: String, value: String): EditText = EditText(this).apply {
         setHint(hint)
         setText(value)
-        singleLine = true
+        setSingleLine(true)
         setPadding(dp(10), 0, dp(10), 0)
     }
 
