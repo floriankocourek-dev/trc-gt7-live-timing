@@ -198,9 +198,22 @@ function TrackMap({ trackMap, focusEntryId }) {
   const padding = 56;
   const points = trackMap.points || [];
   const linePoints = points.length > 2 ? [...points, points[0]] : points;
+  const sectors = trackMap.sectors || [];
   const toScreenX = (x) => padding + (1 - x) * (width - padding * 2);
   const toScreenY = (y) => padding + (1 - y) * (height - padding * 2);
   const polyline = linePoints.map((point) => `${toScreenX(point.x)},${toScreenY(point.y)}`).join(' ');
+  const sectorSegments = linePoints.slice(0, -1).map((point, index) => {
+    const nextPoint = linePoints[index + 1];
+    const progress = point.progress ?? (index / Math.max(points.length - 1, 1));
+    const nextProgress = nextPoint.progress ?? ((index + 1) / Math.max(points.length - 1, 1));
+    const middleProgress = (progress + nextProgress) / 2;
+    const sector = sectors.find((item) => middleProgress >= item.start_progress && middleProgress < item.end_progress) || sectors.at(-1);
+    return {
+      key: `${index}-${sector?.sector_number || 0}`,
+      sectorNumber: sector?.sector_number || 0,
+      points: `${toScreenX(point.x)},${toScreenY(point.y)} ${toScreenX(nextPoint.x)},${toScreenY(nextPoint.y)}`,
+    };
+  });
   const visibleCars = focusEntryId ? (trackMap.cars || []).filter((car) => car.entry_id === focusEntryId) : (trackMap.cars || []);
 
   return (
@@ -226,7 +239,17 @@ function TrackMap({ trackMap, focusEntryId }) {
       ) : (
         <svg className="trackMap" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Live trackmap">
           <polyline className="trackLineShadow" points={polyline} />
-          <polyline className="trackLine" points={polyline} />
+          {sectorSegments.length ? (
+            sectorSegments.map((segment) => (
+              <polyline
+                key={segment.key}
+                className={`trackLine trackSector sectorPaint${((segment.sectorNumber - 1) % 6) + 1}`}
+                points={segment.points}
+              />
+            ))
+          ) : (
+            <polyline className="trackLine" points={polyline} />
+          )}
           {visibleCars.map((car) => {
             const x = toScreenX(car.x);
             const y = toScreenY(car.y);
@@ -257,10 +280,11 @@ function StandingsTable({ rows }) {
             <th>Team</th>
             <th>Driver</th>
             <th>Car</th>
-            <th>Laps</th>
+            <th>Lap</th>
             <th>Gap</th>
             <th>Int</th>
             {sectorNumbers.map((number) => <th key={`s${number}`}>S{number}</th>)}
+            <th>Top</th>
             <th>Last</th>
             <th>Best</th>
             <th>Pit</th>
@@ -286,6 +310,7 @@ function StandingsTable({ rows }) {
                   <SectorCell sector={row.sector_display?.find((sector) => sector.sector_number === number)} />
                 </td>
               ))}
+              <td>{fmtFixed(row.current_lap_top_speed_kmh, 1, ' km/h')}</td>
               <td>{formatMs(row.last_lap_ms)}</td>
               <td>{formatMs(row.best_lap_ms)}</td>
               <td>{row.pit_stops}</td>
@@ -296,7 +321,7 @@ function StandingsTable({ rows }) {
           ))}
           {!rows.length && (
             <tr>
-              <td colSpan={15 + sectorCount} className="empty">No standings yet.</td>
+              <td colSpan={16 + sectorCount} className="empty">No standings yet.</td>
             </tr>
           )}
         </tbody>
@@ -369,7 +394,7 @@ function TeamEngineer() {
         <LiveBadge status={state?.connection_status || 'waiting'} />
       </div>
       {error && <p className="notice error">{error}</p>}
-      {state ? <EngineerPanel state={state} /> : <p className="notice">Waiting for telemetry.</p>}
+      {state ? <EngineerPanel state={state} token={token} setState={setState} /> : <p className="notice">Waiting for telemetry.</p>}
     </section>
   );
 }
@@ -391,7 +416,7 @@ function formatTelemetryValue(value) {
   return fmt(value);
 }
 
-function EngineerPanel({ state }) {
+function EngineerPanel({ state, token, setState }) {
   const entry = state.entry;
   const standing = state.standing || {};
   return (
@@ -416,15 +441,15 @@ function EngineerPanel({ state }) {
         <Metric label="Fuel" value={fmtFixed(state.fuel_liters, 2, ' L')} />
         <Metric label="Fuel / Lap" value={fmtFixed(state.fuel_per_lap, 2, ' L')} />
         <Metric label="Laps Remaining" value={fmtFixed(state.estimated_laps_remaining, 1)} />
-        <Metric label="Fuel For This Lap" value={fmtFixed(state.fuel_for_this_lap, 2, ' L')} />
-        <Metric label="Stint" value={fmt(state.current_stint_laps, ' laps')} />
+        <Metric label="Fuel %" value={fmtFixed(state.fuel_percent, 0, '%')} />
+        <Metric label="Stint" value={fmt(state.current_stint_number)} />
         <Metric label="Pit Stops" value={fmt(standing.pit_stops)} />
 
         <Metric label="Live Speed" value={fmtFixed(state.speed_kmh, 1, ' km/h')} />
         <Metric label="Top Speed" value={fmtFixed(state.top_speed_kmh, 1, ' km/h')} />
         <Metric label="Gear" value={fmt(state.gear)} />
-        <Metric label="Throttle" value={fmt(state.throttle, '%')} />
-        <Metric label="Brake" value={fmt(state.brake, '%')} />
+        <Metric label="Throttle" value={fmtFixed(state.throttle, 0, '%')} />
+        <Metric label="Brake" value={fmtFixed(state.brake, 0, '%')} />
         <Metric label="Connection" value={fmt(state.connection_status)} />
 
         <Metric label="Tyre FL" value={fmtFixed(state.tire_temp_fl, 1, ' C')} />
@@ -435,7 +460,7 @@ function EngineerPanel({ state }) {
 
       <TrackMap trackMap={state.trackmap} focusEntryId={entry.entry_id} />
 
-      <EngineerLapTable state={state} />
+      <EngineerLapTable state={state} token={token} setState={setState} />
 
       {state.gt7_telemetry && (
         <>
@@ -451,7 +476,7 @@ function EngineerPanel({ state }) {
   );
 }
 
-function EngineerLapTable({ state }) {
+function EngineerLapTable({ state, token, setState }) {
   const current = state.current_lap;
   const history = state.lap_history || [];
   const sectorCount = Math.max(
@@ -467,6 +492,7 @@ function EngineerLapTable({ state }) {
       driver_name: current.driver_name,
       lap_time_ms: null,
       lap_label: 'running',
+      lap_state: 'normal',
       sectors: current.sector_display,
       fuel_start_liters: null,
       fuel_end_liters: null,
@@ -481,6 +507,7 @@ function EngineerLapTable({ state }) {
       driver_name: lap.driver_name,
       lap_time_ms: lap.lap_time_ms,
       lap_label: formatMs(lap.lap_time_ms),
+      lap_state: lap.lap_state || 'normal',
       sectors: lap.sector_times,
       fuel_start_liters: lap.fuel_start_liters,
       fuel_end_liters: lap.fuel_end_liters,
@@ -519,12 +546,12 @@ function EngineerLapTable({ state }) {
                     <SectorCell sector={row.sectors?.find((sector) => sector.sector_number === number)} />
                   </td>
                 ))}
-                <td>{row.lap_label}</td>
+                <td><span className={`lapTimeCell lap-${row.lap_state}`}>{row.lap_label}</span></td>
                 <td>{fmtFixed(row.fuel_start_liters, 2, ' L')}</td>
                 <td>{fmtFixed(row.fuel_end_liters, 2, ' L')}</td>
                 <td>{fmtFixed(row.fuel_used_liters, 2, ' L')}</td>
                 <td>{row.pit_lap ? 'yes' : '-'}</td>
-                <td>{fmt(row.notes)}</td>
+                <td>{row.live ? '-' : <LapNoteInput row={row} token={token} setState={setState} />}</td>
               </tr>
             ))}
             {!rows.length && (
@@ -536,6 +563,41 @@ function EngineerLapTable({ state }) {
         </table>
       </div>
     </>
+  );
+}
+
+function LapNoteInput({ row, token, setState }) {
+  const [value, setValue] = useState(row.notes === '-' ? '' : row.notes || '');
+
+  useEffect(() => {
+    setValue(row.notes === '-' ? '' : row.notes || '');
+  }, [row.lap, row.notes]);
+
+  async function save() {
+    await api('/api/team/me/lap-notes', {
+      token,
+      method: 'PATCH',
+      body: JSON.stringify({ lap: row.lap, notes: value }),
+    });
+    setState((previous) => {
+      if (!previous) return previous;
+      return {
+        ...previous,
+        lap_history: previous.lap_history.map((lap) => (
+          lap.lap === row.lap ? { ...lap, notes: value } : lap
+        )),
+      };
+    });
+  }
+
+  return (
+    <input
+      className="noteInput"
+      value={value}
+      placeholder="Add note"
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={save}
+    />
   );
 }
 

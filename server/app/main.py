@@ -121,6 +121,7 @@ def init_db() -> None:
                 team_code_hash TEXT NOT NULL,
                 status TEXT NOT NULL,
                 pit_stops INTEGER NOT NULL DEFAULT 0,
+                last_pit_lap INTEGER,
                 pit_status TEXT NOT NULL DEFAULT 'on_track',
                 penalty_seconds INTEGER NOT NULL DEFAULT 0,
                 manual_status TEXT,
@@ -292,6 +293,7 @@ def init_db() -> None:
         ensure_column(conn, "races", "sector_count", f"INTEGER NOT NULL DEFAULT {DEFAULT_SECTOR_COUNT}")
         ensure_column(conn, "races", "red_threshold_ms", f"INTEGER NOT NULL DEFAULT {DEFAULT_RED_THRESHOLD_MS}")
         ensure_column(conn, "entries", "pit_status", "TEXT NOT NULL DEFAULT 'on_track'")
+        ensure_column(conn, "entries", "last_pit_lap", "INTEGER")
         for table in ("telemetry_packets", "latest_telemetry"):
             ensure_column(conn, table, "tire_compound", "TEXT")
             ensure_column(conn, table, "tire_temp_fl", "REAL")
@@ -400,6 +402,11 @@ class SectorConfigUpdate(BaseModel):
     red_threshold_ms: int = DEFAULT_RED_THRESHOLD_MS
 
 
+class LapNoteUpdate(BaseModel):
+    lap: int
+    notes: str = ""
+
+
 def row_to_race(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "race_id": row["race_id"],
@@ -428,6 +435,7 @@ def row_to_entry(row: sqlite3.Row, include_private: bool = False) -> dict[str, A
         "drivers": json.loads(row["drivers_json"]),
         "status": row["status"],
         "pit_stops": row["pit_stops"],
+        "last_pit_lap": row["last_pit_lap"],
         "pit_status": row["pit_status"],
         "penalty_seconds": row["penalty_seconds"],
         "manual_status": row["manual_status"],
@@ -613,10 +621,13 @@ def reference_rejection_reason(points: list[dict[str, Any]]) -> str:
 def normalize_track_point(point: dict[str, Any], bounds: dict[str, float]) -> dict[str, float]:
     width = max(bounds["max_x"] - bounds["min_x"], 1.0)
     height = max(bounds["max_z"] - bounds["min_z"], 1.0)
-    return {
+    normalized = {
         "x": round((float(point["x"]) - bounds["min_x"]) / width, 5),
         "y": round((float(point["z"]) - bounds["min_z"]) / height, 5),
     }
+    if "progress" in point:
+        normalized["progress"] = round(float(point["progress"]), 6)
+    return normalized
 
 
 def nearest_reference_point(points: list[dict[str, Any]], x: float, z: float) -> tuple[int, dict[str, Any]] | None:
@@ -867,6 +878,14 @@ def finalize_lap_sectors(
     fuel_start = fuel_rows[0]["fuel_liters"] if fuel_rows else None
     fuel_end = fuel_rows[-1]["fuel_liters"] if fuel_rows else None
     fuel_used = round(fuel_start - fuel_end, 2) if fuel_start is not None and fuel_end is not None and fuel_start >= fuel_end else None
+    pit_lap = False
+    previous_fuel = None
+    for fuel_row in fuel_rows:
+        current_fuel = fuel_row["fuel_liters"]
+        if previous_fuel is not None and current_fuel - previous_fuel >= PIT_FUEL_INCREASE_LITERS:
+            pit_lap = True
+            break
+        previous_fuel = current_fuel
     conn.execute(
         """
         INSERT INTO lap_sector_summaries (race_id, entry_id, driver_id, lap, lap_time_ms, sector_count,
@@ -898,7 +917,7 @@ def finalize_lap_sectors(
             fuel_start,
             fuel_end,
             fuel_used,
-            0,
+            1 if pit_lap else 0,
             None if complete else "Incomplete sector data",
             completed_at,
         ),
@@ -1149,6 +1168,15 @@ def build_sector_display(
 
 
 def build_lap_history(entry: sqlite3.Row, limit: int = 25) -> list[dict[str, Any]]:
+    fastest = fetch_one(
+        """
+        SELECT MIN(lap_time_ms) AS best_lap_ms
+        FROM lap_sector_summaries
+        WHERE race_id = ? AND lap_time_ms IS NOT NULL AND sector_status = 'complete'
+        """,
+        (entry["race_id"],),
+    )
+    fastest_lap_ms = fastest["best_lap_ms"] if fastest and fastest["best_lap_ms"] is not None else None
     summaries = fetch_all(
         """
         SELECT * FROM lap_sector_summaries
@@ -1173,29 +1201,73 @@ def build_lap_history(entry: sqlite3.Row, limit: int = 25) -> list[dict[str, Any
                     else "not_available",
                 }
             )
+        pit_lap = bool(summary["pit_lap"]) or lap_has_fuel_increase(entry["entry_id"], summary["lap"])
         result.append(
             {
                 "lap": summary["lap"],
                 "driver_id": summary["driver_id"],
                 "driver_name": driver_display(entry, summary["driver_id"]),
                 "lap_time_ms": summary["lap_time_ms"],
+                "lap_state": "purple" if fastest_lap_ms is not None and summary["lap_time_ms"] == fastest_lap_ms else "normal",
                 "sector_status": summary["sector_status"],
                 "sector_times": sector_times,
                 "fuel_start_liters": summary["fuel_start_liters"],
                 "fuel_end_liters": summary["fuel_end_liters"],
                 "fuel_used_liters": summary["fuel_used_liters"],
-                "pit_lap": bool(summary["pit_lap"]),
+                "pit_lap": pit_lap,
                 "notes": summary["notes"],
             }
         )
     return result
 
 
+def derived_pit_stops(entry_id: str, fallback: int = 0) -> int:
+    row = fetch_one(
+        """
+        SELECT COUNT(DISTINCT lap) AS pit_laps
+        FROM (
+            SELECT lap,
+                   fuel_liters - LAG(fuel_liters) OVER (ORDER BY id) AS fuel_delta
+            FROM telemetry_packets
+            WHERE entry_id = ? AND fuel_liters IS NOT NULL
+        )
+        WHERE fuel_delta >= ?
+        """,
+        (entry_id, PIT_FUEL_INCREASE_LITERS),
+    )
+    if row and row["pit_laps"] is not None and row["pit_laps"] > 0:
+        return int(row["pit_laps"])
+    return fallback
+
+
+def lap_has_fuel_increase(entry_id: str, lap: int) -> bool:
+    rows = fetch_all(
+        """
+        SELECT fuel_liters FROM telemetry_packets
+        WHERE entry_id = ? AND lap = ? AND fuel_liters IS NOT NULL
+        ORDER BY id ASC
+        """,
+        (entry_id, lap),
+    )
+    previous = None
+    for row in rows:
+        current = row["fuel_liters"]
+        if previous is not None and current - previous >= PIT_FUEL_INCREASE_LITERS:
+            return True
+        previous = current
+    return False
+
+
 def compute_standings(race_id: str) -> list[dict[str, Any]]:
     rows = fetch_all(
         """
         SELECT e.*, lt.driver_id AS lt_driver_id, lt.lap, lt.lap_progress, lt.last_lap_ms,
-               lt.best_lap_ms, lt.telemetry_status, lt.received_at
+               lt.best_lap_ms, lt.telemetry_status, lt.received_at,
+               (
+                   SELECT MAX(tp.speed_kmh)
+                   FROM telemetry_packets tp
+                   WHERE tp.entry_id = e.entry_id AND tp.lap = lt.lap AND tp.speed_kmh IS NOT NULL
+               ) AS current_lap_top_speed_kmh
         FROM entries e
         LEFT JOIN latest_telemetry lt ON lt.entry_id = e.entry_id
         WHERE e.race_id = ?
@@ -1249,8 +1321,9 @@ def compute_standings(race_id: str) -> list[dict[str, Any]]:
                 "gap_to_behind": None,
                 "last_lap_ms": row["last_lap_ms"],
                 "best_lap_ms": row["best_lap_ms"],
+                "current_lap_top_speed_kmh": round(row["current_lap_top_speed_kmh"], 1) if row["current_lap_top_speed_kmh"] is not None else None,
                 "pit_status": row["pit_status"] if latest_present else "offline",
-                "pit_stops": row["pit_stops"],
+                "pit_stops": derived_pit_stops(row["entry_id"], row["pit_stops"] or 0),
                 "penalty_seconds": row["penalty_seconds"],
                 "status": status,
                 "connection_status": connection_status(row if latest_present else None),
@@ -1351,11 +1424,14 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
     latest = fetch_one("SELECT * FROM latest_telemetry WHERE entry_id = ?", (entry_id,))
     standings = compute_standings(entry["race_id"])
     own_standing = next((item for item in standings if item["entry_id"] == entry_id), None)
+    latest_dict = dict(latest) if latest else {}
+    gt7_telemetry = json.loads(latest_dict["gt7_telemetry_json"]) if latest_dict.get("gt7_telemetry_json") else None
 
     fuel_per_lap = None
     estimated_laps_remaining = None
-    fuel_for_this_lap = None
+    fuel_percent = None
     current_stint_laps = 0
+    current_stint_number = 1
     history = fetch_all(
         """
         SELECT lap, fuel_liters FROM telemetry_packets
@@ -1373,13 +1449,21 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
             fuel_per_lap = round(fuel_delta / lap_delta, 2)
             if latest and latest["fuel_liters"] is not None:
                 estimated_laps_remaining = round(latest["fuel_liters"] / fuel_per_lap, 1)
-                latest_progress = latest["lap_progress"] if latest["lap_progress"] is not None else 0
-                remaining_progress = max(0.0, min(1.0, 1.0 - float(latest_progress)))
-                fuel_for_this_lap = round(fuel_per_lap * remaining_progress, 2)
             current_stint_laps = lap_delta
 
-    latest_dict = dict(latest) if latest else {}
-    gt7_telemetry = json.loads(latest_dict["gt7_telemetry_json"]) if latest_dict.get("gt7_telemetry_json") else None
+    if latest and latest["fuel_liters"] is not None:
+        fuel_capacity = gt7_telemetry.get("fuel_capacity") if isinstance(gt7_telemetry, dict) else None
+        try:
+            if fuel_capacity and float(fuel_capacity) > 0:
+                fuel_percent = round((float(latest["fuel_liters"]) / float(fuel_capacity)) * 100)
+        except (TypeError, ValueError):
+            fuel_percent = None
+
+    last_pit_lap = entry["last_pit_lap"]
+    if latest and latest["lap"] is not None:
+        current_stint_laps = max(0, int(latest["lap"]) - int(last_pit_lap or 0))
+    current_stint_number = derived_pit_stops(entry_id, entry["pit_stops"] or 0) + 1
+
     top_speed_row = fetch_one(
         "SELECT MAX(speed_kmh) AS top_speed_kmh FROM telemetry_packets WHERE entry_id = ? AND speed_kmh IS NOT NULL",
         (entry_id,),
@@ -1412,10 +1496,10 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
         "fuel_liters": latest_dict.get("fuel_liters"),
         "fuel_per_lap": fuel_per_lap,
         "estimated_laps_remaining": estimated_laps_remaining,
-        "fuel_for_this_lap": fuel_for_this_lap,
+        "fuel_percent": fuel_percent,
         "speed_kmh": latest_dict.get("speed_kmh"),
         "top_speed_kmh": round(top_speed_row["top_speed_kmh"], 1) if top_speed_row and top_speed_row["top_speed_kmh"] is not None else None,
-        "total_laps": gt7_telemetry.get("total_laps") if isinstance(gt7_telemetry, dict) else None,
+        "total_laps": gt7_telemetry.get("total_laps") if isinstance(gt7_telemetry, dict) and gt7_telemetry.get("total_laps") else None,
         "gear": latest_dict.get("gear"),
         "rpm": latest_dict.get("rpm"),
         "throttle": latest_dict.get("throttle"),
@@ -1430,6 +1514,7 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
         "tire_temp_rr": latest_dict.get("tire_temp_rr"),
         "gt7_telemetry": gt7_telemetry,
         "current_stint_laps": current_stint_laps,
+        "current_stint_number": current_stint_number,
         "last_seen": latest_dict.get("received_at"),
         "connection_status": connection_status(latest),
     }
@@ -1437,7 +1522,7 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
 
 def update_pit_detection(conn: sqlite3.Connection, session: sqlite3.Row, payload: TelemetryIn) -> None:
     previous = conn.execute("SELECT * FROM latest_telemetry WHERE entry_id = ?", (session["entry_id"],)).fetchone()
-    entry = conn.execute("SELECT pit_status, pit_stops FROM entries WHERE entry_id = ?", (session["entry_id"],)).fetchone()
+    entry = conn.execute("SELECT pit_status, pit_stops, last_pit_lap FROM entries WHERE entry_id = ?", (session["entry_id"],)).fetchone()
     if not entry:
         return
 
@@ -1449,7 +1534,7 @@ def update_pit_detection(conn: sqlite3.Connection, session: sqlite3.Row, payload
         fuel_increase = payload.fuel_liters - previous["fuel_liters"]
         if fuel_increase >= PIT_FUEL_INCREASE_LITERS:
             next_status = "in_pit"
-            should_count_stop = current_status != "in_pit"
+            should_count_stop = current_status != "in_pit" and entry["last_pit_lap"] != payload.lap
 
     if current_status == "in_pit" and payload.speed_kmh is not None and payload.speed_kmh >= PIT_EXIT_SPEED_KMH:
         next_status = "on_track"
@@ -1457,8 +1542,8 @@ def update_pit_detection(conn: sqlite3.Connection, session: sqlite3.Row, payload
     if next_status != current_status or should_count_stop:
         pit_stops = entry["pit_stops"] + (1 if should_count_stop else 0)
         conn.execute(
-            "UPDATE entries SET pit_status = ?, pit_stops = ? WHERE entry_id = ?",
-            (next_status, pit_stops, session["entry_id"]),
+            "UPDATE entries SET pit_status = ?, pit_stops = ?, last_pit_lap = COALESCE(?, last_pit_lap) WHERE entry_id = ?",
+            (next_status, pit_stops, payload.lap if should_count_stop else None, session["entry_id"]),
         )
         if should_count_stop:
             conn.execute(
@@ -1831,6 +1916,22 @@ def team_login(payload: TeamLogin) -> dict[str, str]:
 @app.get("/api/team/me")
 def team_me(session: sqlite3.Row = Depends(require_team)) -> dict[str, Any]:
     return private_state_for_entry(session["entry_id"])
+
+
+@app.patch("/api/team/me/lap-notes")
+async def update_team_lap_notes(payload: LapNoteUpdate, session: sqlite3.Row = Depends(require_team)) -> dict[str, Any]:
+    summary = fetch_one(
+        "SELECT id FROM lap_sector_summaries WHERE entry_id = ? AND lap = ?",
+        (session["entry_id"], payload.lap),
+    )
+    if not summary:
+        raise HTTPException(status_code=404, detail="Lap history row not found")
+    execute(
+        "UPDATE lap_sector_summaries SET notes = ? WHERE entry_id = ? AND lap = ?",
+        (payload.notes.strip(), session["entry_id"], payload.lap),
+    )
+    await hub.broadcast(session["race_id"])
+    return {"ok": True, "lap": payload.lap, "notes": payload.notes.strip()}
 
 
 @app.post("/api/collector/register")
