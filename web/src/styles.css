@@ -220,6 +220,55 @@ tr:hover td {
   font-weight: 800;
 }
 
+.sectorCell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 62px;
+  min-height: 26px;
+  border-radius: 6px;
+  padding: 3px 8px;
+  background: #f1f1ec;
+  color: #171717;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.sector-purple {
+  background: #6f2cff;
+  color: white;
+}
+
+.sector-green {
+  background: #dff7e6;
+  color: #12662e;
+}
+
+.sector-red {
+  background: #fff0f2;
+  color: #b00020;
+}
+
+.sector-calculating {
+  background: #171717;
+  color: white;
+}
+
+.sector-not-reached,
+.sector-not-available {
+  background: #eceff3;
+  color: #6c7280;
+}
+
+.sectorHistory {
+  margin: 12px 0 16px;
+}
+
+.liveLapRow td {
+  background: #fcfcfb;
+  font-weight: 800;
+}
+
 .empty {
   text-align: center;
   color: #6c7280;
@@ -309,6 +358,31 @@ tr:hover td {
 
 .headlineBand.compact {
   align-items: end;
+}
+
+.raceDetailStack {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.raceDetailStack .headlineBand {
+  margin: 0;
+}
+
+.sectorSettings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+  border: 1px solid #deded8;
+  border-radius: 8px;
+  background: white;
+  padding: 12px;
+}
+
+.sectorSettings label {
+  min-width: 180px;
 }
 
 .headlineBand .eyebrow {

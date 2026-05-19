@@ -32,6 +32,8 @@ MIN_REFERENCE_POINTS = 40
 IDEAL_REFERENCE_POINTS = 120
 REFERENCE_CLOSE_DISTANCE_RATIO = 0.08
 MIN_TRACK_DIAGONAL = 100.0
+DEFAULT_SECTOR_COUNT = 3
+DEFAULT_RED_THRESHOLD_MS = 500
 
 
 def now_iso() -> str:
@@ -102,6 +104,8 @@ def init_db() -> None:
                 event_type TEXT NOT NULL,
                 drivers_per_team INTEGER NOT NULL,
                 classes_json TEXT NOT NULL,
+                sector_count INTEGER NOT NULL DEFAULT 3,
+                red_threshold_ms INTEGER NOT NULL DEFAULT 500,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -239,8 +243,54 @@ def init_db() -> None:
                 started_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS sector_definitions (
+                race_id TEXT NOT NULL,
+                sector_number INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                start_progress REAL NOT NULL,
+                end_progress REAL NOT NULL,
+                color_index INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (race_id, sector_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS sector_crossings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                race_id TEXT NOT NULL,
+                entry_id TEXT NOT NULL,
+                driver_id TEXT NOT NULL,
+                lap INTEGER NOT NULL,
+                sector_number INTEGER NOT NULL,
+                crossing_ms INTEGER NOT NULL,
+                sector_time_ms INTEGER,
+                crossed_at TEXT NOT NULL,
+                UNIQUE(entry_id, lap, sector_number)
+            );
+
+            CREATE TABLE IF NOT EXISTS lap_sector_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                race_id TEXT NOT NULL,
+                entry_id TEXT NOT NULL,
+                driver_id TEXT NOT NULL,
+                lap INTEGER NOT NULL,
+                lap_time_ms INTEGER,
+                sector_count INTEGER NOT NULL,
+                sector_times_json TEXT NOT NULL,
+                sector_status TEXT NOT NULL,
+                fuel_start_liters REAL,
+                fuel_end_liters REAL,
+                fuel_used_liters REAL,
+                pit_lap INTEGER NOT NULL DEFAULT 0,
+                notes TEXT,
+                completed_at TEXT NOT NULL,
+                UNIQUE(entry_id, lap)
+            );
             """
         )
+        ensure_column(conn, "races", "sector_count", f"INTEGER NOT NULL DEFAULT {DEFAULT_SECTOR_COUNT}")
+        ensure_column(conn, "races", "red_threshold_ms", f"INTEGER NOT NULL DEFAULT {DEFAULT_RED_THRESHOLD_MS}")
         ensure_column(conn, "entries", "pit_status", "TEXT NOT NULL DEFAULT 'on_track'")
         for table in ("telemetry_packets", "latest_telemetry"):
             ensure_column(conn, table, "tire_compound", "TEXT")
@@ -266,6 +316,8 @@ class RaceCreate(BaseModel):
     event_type: Literal["solo", "team"] = "team"
     drivers_per_team: int = 2
     classes: list[str] = Field(default_factory=lambda: ["GT3"])
+    sector_count: int = DEFAULT_SECTOR_COUNT
+    red_threshold_ms: int = DEFAULT_RED_THRESHOLD_MS
     status: str = "scheduled"
 
 
@@ -343,6 +395,11 @@ class RaceStatusUpdate(BaseModel):
     status: str
 
 
+class SectorConfigUpdate(BaseModel):
+    sector_count: int
+    red_threshold_ms: int = DEFAULT_RED_THRESHOLD_MS
+
+
 def row_to_race(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "race_id": row["race_id"],
@@ -353,6 +410,8 @@ def row_to_race(row: sqlite3.Row) -> dict[str, Any]:
         "event_type": row["event_type"],
         "drivers_per_team": row["drivers_per_team"],
         "classes": json.loads(row["classes_json"]),
+        "sector_count": row["sector_count"],
+        "red_threshold_ms": row["red_threshold_ms"],
         "status": row["status"],
         "created_at": row["created_at"],
     }
@@ -466,6 +525,56 @@ def point_distance(a: dict[str, Any], b: dict[str, Any]) -> float:
     return ((float(a["x"]) - float(b["x"])) ** 2 + (float(a["z"]) - float(b["z"])) ** 2) ** 0.5
 
 
+def add_reference_progress(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not points:
+        return points
+    distances = [0.0]
+    total = 0.0
+    for index in range(1, len(points)):
+        total += point_distance(points[index - 1], points[index])
+        distances.append(total)
+    if total <= 0:
+        return [{**point, "progress": 0.0} for point in points]
+    return [{**point, "progress": round(distances[index] / total, 6)} for index, point in enumerate(points)]
+
+
+def ensure_sector_definitions(conn: sqlite3.Connection, race_id: str) -> list[sqlite3.Row]:
+    race = conn.execute("SELECT sector_count FROM races WHERE race_id = ?", (race_id,)).fetchone()
+    sector_count = max(1, int(race["sector_count"] if race else DEFAULT_SECTOR_COUNT))
+    existing = conn.execute(
+        "SELECT * FROM sector_definitions WHERE race_id = ? ORDER BY sector_number",
+        (race_id,),
+    ).fetchall()
+    if len(existing) == sector_count:
+        return existing
+    now = now_iso()
+    conn.execute("DELETE FROM sector_definitions WHERE race_id = ?", (race_id,))
+    for sector_number in range(1, sector_count + 1):
+        start_progress = (sector_number - 1) / sector_count
+        end_progress = sector_number / sector_count
+        conn.execute(
+            """
+            INSERT INTO sector_definitions (race_id, sector_number, name, start_progress, end_progress,
+                                            color_index, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                race_id,
+                sector_number,
+                f"Sector {sector_number}",
+                start_progress,
+                end_progress,
+                sector_number,
+                now,
+                now,
+            ),
+        )
+    return conn.execute(
+        "SELECT * FROM sector_definitions WHERE race_id = ? ORDER BY sector_number",
+        (race_id,),
+    ).fetchall()
+
+
 def track_bounds(points: list[dict[str, Any]]) -> dict[str, float]:
     xs = [float(point["x"]) for point in points]
     zs = [float(point["z"]) for point in points]
@@ -531,7 +640,7 @@ def reference_progress(conn: sqlite3.Connection, race_id: str, x: float | None, 
     if not nearest or len(points) < 2:
         return None
     index, _point = nearest
-    return round(index / (len(points) - 1), 4)
+    return round(float(_point.get("progress", index / (len(points) - 1))), 4)
 
 
 def update_track_reference(conn: sqlite3.Connection, session: sqlite3.Row, payload: TelemetryIn, received_at: str) -> None:
@@ -572,6 +681,7 @@ def update_track_reference(conn: sqlite3.Connection, session: sqlite3.Row, paylo
     if payload.lap > buffer["lap"] and reference_lap_is_complete(points):
         if point_distance(points[0], points[-1]) > 0:
             points.append(points[0])
+        points = add_reference_progress(points)
         bounds = track_bounds(points)
         conn.execute(
             """
@@ -591,6 +701,7 @@ def update_track_reference(conn: sqlite3.Connection, session: sqlite3.Row, paylo
             "INSERT INTO race_log (race_id, entry_id, level, message, created_at) VALUES (?, ?, ?, ?, ?)",
             (session["race_id"], session["entry_id"], "info", f"Trackmap reference lap recorded from {session['entry_id']} lap {buffer['lap']}", received_at),
         )
+        ensure_sector_definitions(conn, session["race_id"])
     elif payload.lap > buffer["lap"] and len(points) >= MIN_REFERENCE_POINTS:
         conn.execute(
             "INSERT INTO race_log (race_id, entry_id, level, message, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -616,6 +727,468 @@ def update_track_reference(conn: sqlite3.Connection, session: sqlite3.Row, paylo
         """,
         (session["entry_id"], session["race_id"], payload.lap, json.dumps([point]), received_at, received_at),
     )
+
+
+def parse_time_ms(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return int(parsed.timestamp() * 1000)
+
+
+def estimated_lap_elapsed_ms(conn: sqlite3.Connection, entry_id: str, lap: int, received_at: str) -> int | None:
+    first = conn.execute(
+        "SELECT received_at FROM telemetry_packets WHERE entry_id = ? AND lap = ? ORDER BY id ASC LIMIT 1",
+        (entry_id, lap),
+    ).fetchone()
+    start_ms = parse_time_ms(first["received_at"]) if first else None
+    current_ms = parse_time_ms(received_at)
+    if start_ms is None or current_ms is None:
+        return None
+    return max(0, current_ms - start_ms)
+
+
+def interpolate_crossing_ms(
+    boundary: float,
+    previous_progress: float,
+    current_progress: float,
+    previous_ms: int | None,
+    current_ms: int | None,
+) -> int | None:
+    if previous_ms is None or current_ms is None or current_progress <= previous_progress:
+        return current_ms
+    ratio = (boundary - previous_progress) / (current_progress - previous_progress)
+    ratio = max(0.0, min(1.0, ratio))
+    return int(round(previous_ms + ratio * (current_ms - previous_ms)))
+
+
+def gt7_current_lap_ms_from_dict(data: dict[str, Any] | None) -> int | None:
+    if not isinstance(data, dict):
+        return None
+    for key in ("current_lap_ms", "currentLapMs", "current_lap_time_ms", "lap_elapsed_ms"):
+        value = data.get(key)
+        if value is None:
+            continue
+        try:
+            return max(0, int(float(value)))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def previous_gt7_current_lap_ms(row: sqlite3.Row | None) -> int | None:
+    if not row or not row["gt7_telemetry_json"]:
+        return None
+    try:
+        return gt7_current_lap_ms_from_dict(json.loads(row["gt7_telemetry_json"]))
+    except json.JSONDecodeError:
+        return None
+
+
+def insert_sector_crossing(
+    conn: sqlite3.Connection,
+    race_id: str,
+    entry_id: str,
+    driver_id: str,
+    lap: int,
+    sector_number: int,
+    crossing_ms: int,
+    crossed_at: str,
+) -> None:
+    previous = conn.execute(
+        """
+        SELECT crossing_ms FROM sector_crossings
+        WHERE entry_id = ? AND lap = ? AND sector_number < ?
+        ORDER BY sector_number DESC LIMIT 1
+        """,
+        (entry_id, lap, sector_number),
+    ).fetchone()
+    previous_ms = previous["crossing_ms"] if previous else 0
+    sector_time_ms = max(0, int(crossing_ms) - int(previous_ms))
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO sector_crossings (race_id, entry_id, driver_id, lap, sector_number,
+                                                crossing_ms, sector_time_ms, crossed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (race_id, entry_id, driver_id, lap, sector_number, int(crossing_ms), sector_time_ms, crossed_at),
+    )
+
+
+def finalize_lap_sectors(
+    conn: sqlite3.Connection,
+    race_id: str,
+    entry_id: str,
+    driver_id: str,
+    lap: int,
+    lap_time_ms: int | None,
+    completed_at: str,
+) -> None:
+    if lap <= 0:
+        return
+    sectors = ensure_sector_definitions(conn, race_id)
+    sector_count = len(sectors)
+    if sector_count <= 0:
+        return
+    finish_ms = lap_time_ms
+    if finish_ms is None:
+        finish_ms = estimated_lap_elapsed_ms(conn, entry_id, lap, completed_at)
+    if finish_ms is not None:
+        insert_sector_crossing(conn, race_id, entry_id, driver_id, lap, sector_count, finish_ms, completed_at)
+
+    rows = conn.execute(
+        "SELECT * FROM sector_crossings WHERE entry_id = ? AND lap = ? ORDER BY sector_number",
+        (entry_id, lap),
+    ).fetchall()
+    row_by_sector = {row["sector_number"]: row for row in rows}
+    complete = all(number in row_by_sector for number in range(1, sector_count + 1))
+    sector_times = []
+    for number in range(1, sector_count + 1):
+        row = row_by_sector.get(number)
+        sector_times.append(
+            {
+                "sector_number": number,
+                "crossing_ms": row["crossing_ms"] if row else None,
+                "sector_time_ms": row["sector_time_ms"] if row else None,
+                "state": "normal" if row else "not_available",
+            }
+        )
+    fuel_rows = conn.execute(
+        """
+        SELECT fuel_liters FROM telemetry_packets
+        WHERE entry_id = ? AND lap = ? AND fuel_liters IS NOT NULL
+        ORDER BY id ASC
+        """,
+        (entry_id, lap),
+    ).fetchall()
+    fuel_start = fuel_rows[0]["fuel_liters"] if fuel_rows else None
+    fuel_end = fuel_rows[-1]["fuel_liters"] if fuel_rows else None
+    fuel_used = round(fuel_start - fuel_end, 2) if fuel_start is not None and fuel_end is not None and fuel_start >= fuel_end else None
+    conn.execute(
+        """
+        INSERT INTO lap_sector_summaries (race_id, entry_id, driver_id, lap, lap_time_ms, sector_count,
+                                          sector_times_json, sector_status, fuel_start_liters, fuel_end_liters,
+                                          fuel_used_liters, pit_lap, notes, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(entry_id, lap) DO UPDATE SET
+            driver_id = excluded.driver_id,
+            lap_time_ms = excluded.lap_time_ms,
+            sector_count = excluded.sector_count,
+            sector_times_json = excluded.sector_times_json,
+            sector_status = excluded.sector_status,
+            fuel_start_liters = excluded.fuel_start_liters,
+            fuel_end_liters = excluded.fuel_end_liters,
+            fuel_used_liters = excluded.fuel_used_liters,
+            pit_lap = excluded.pit_lap,
+            notes = excluded.notes,
+            completed_at = excluded.completed_at
+        """,
+        (
+            race_id,
+            entry_id,
+            driver_id,
+            lap,
+            finish_ms,
+            sector_count,
+            json.dumps(sector_times),
+            "complete" if complete else "incomplete",
+            fuel_start,
+            fuel_end,
+            fuel_used,
+            0,
+            None if complete else "Incomplete sector data",
+            completed_at,
+        ),
+    )
+
+
+def process_sector_timing(
+    conn: sqlite3.Connection,
+    session: sqlite3.Row,
+    payload: TelemetryIn,
+    lap_progress: float | None,
+    received_at: str,
+) -> None:
+    if payload.lap <= 0 or lap_progress is None or payload.telemetry_status != "valid":
+        return
+    if not conn.execute("SELECT race_id FROM track_references WHERE race_id = ? AND status = 'active'", (session["race_id"],)).fetchone():
+        return
+    sectors = ensure_sector_definitions(conn, session["race_id"])
+    if not sectors:
+        return
+    previous = conn.execute("SELECT * FROM latest_telemetry WHERE entry_id = ?", (session["entry_id"],)).fetchone()
+    if previous and previous["lap"] and payload.lap > previous["lap"]:
+        finalize_lap_sectors(
+            conn,
+            session["race_id"],
+            session["entry_id"],
+            previous["driver_id"],
+            previous["lap"],
+            payload.last_lap_ms,
+            received_at,
+        )
+        return
+    if not previous or previous["lap"] != payload.lap or previous["lap_progress"] is None:
+        return
+    previous_progress = float(previous["lap_progress"])
+    current_progress = float(lap_progress)
+    if current_progress < previous_progress or current_progress - previous_progress > 0.35:
+        return
+    previous_ms = previous_gt7_current_lap_ms(previous)
+    current_ms = gt7_current_lap_ms_from_dict(payload.gt7_telemetry)
+    if previous_ms is None:
+        previous_ms = estimated_lap_elapsed_ms(conn, session["entry_id"], payload.lap, previous["received_at"])
+    if current_ms is None:
+        current_ms = estimated_lap_elapsed_ms(conn, session["entry_id"], payload.lap, received_at)
+    for sector in sectors:
+        sector_number = sector["sector_number"]
+        if sector_number >= len(sectors):
+            continue
+        boundary = float(sector["end_progress"])
+        if previous_progress < boundary <= current_progress:
+            crossing_ms = interpolate_crossing_ms(boundary, previous_progress, current_progress, previous_ms, current_ms)
+            if crossing_ms is not None:
+                insert_sector_crossing(
+                    conn,
+                    session["race_id"],
+                    session["entry_id"],
+                    session["driver_id"],
+                    payload.lap,
+                    sector_number,
+                    crossing_ms,
+                    received_at,
+                )
+
+
+def race_sector_config(race_id: str) -> dict[str, int]:
+    row = fetch_one("SELECT sector_count, red_threshold_ms FROM races WHERE race_id = ?", (race_id,))
+    if not row:
+        return {"sector_count": DEFAULT_SECTOR_COUNT, "red_threshold_ms": DEFAULT_RED_THRESHOLD_MS}
+    return {
+        "sector_count": max(1, int(row["sector_count"] or DEFAULT_SECTOR_COUNT)),
+        "red_threshold_ms": max(0, int(row["red_threshold_ms"] or DEFAULT_RED_THRESHOLD_MS)),
+    }
+
+
+def sector_definitions_for_race(race_id: str) -> list[dict[str, Any]]:
+    config = race_sector_config(race_id)
+    rows = fetch_all("SELECT * FROM sector_definitions WHERE race_id = ? ORDER BY sector_number", (race_id,))
+    if len(rows) == config["sector_count"]:
+        return [dict(row) for row in rows]
+    sector_count = config["sector_count"]
+    return [
+        {
+            "race_id": race_id,
+            "sector_number": number,
+            "name": f"Sector {number}",
+            "start_progress": (number - 1) / sector_count,
+            "end_progress": number / sector_count,
+            "color_index": number,
+        }
+        for number in range(1, sector_count + 1)
+    ]
+
+
+def current_sector_number(sectors: list[dict[str, Any]], lap_progress: float | None) -> int | None:
+    if lap_progress is None or not sectors:
+        return None
+    progress = max(0.0, min(0.999999, float(lap_progress)))
+    for sector in sectors:
+        if float(sector["start_progress"]) <= progress < float(sector["end_progress"]):
+            return int(sector["sector_number"])
+    return int(sectors[-1]["sector_number"])
+
+
+def sector_display_value(sector_time_ms: int | None, state: str) -> str:
+    if state == "calculating":
+        return "calc."
+    if state in {"not_reached", "not_available"} or sector_time_ms is None:
+        return "--"
+    seconds = sector_time_ms / 1000
+    return f"{seconds:.3f}"
+
+
+def best_sector_time(
+    race_id: str,
+    sector_number: int,
+    entry_id: str | None = None,
+) -> int | None:
+    params: list[Any] = [race_id, sector_number]
+    entry_filter = ""
+    if entry_id:
+        entry_filter = "AND sc.entry_id = ?"
+        params.append(entry_id)
+    row = fetch_one(
+        f"""
+        SELECT MIN(sc.sector_time_ms) AS best
+        FROM sector_crossings sc
+        JOIN lap_sector_summaries ls ON ls.race_id = sc.race_id AND ls.entry_id = sc.entry_id AND ls.lap = sc.lap
+        WHERE sc.race_id = ?
+          AND sc.sector_number = ?
+          AND sc.sector_time_ms IS NOT NULL
+          AND ls.sector_status = 'complete'
+          {entry_filter}
+        """,
+        tuple(params),
+    )
+    return int(row["best"]) if row and row["best"] is not None else None
+
+
+def sector_state_for_time(
+    race_id: str,
+    entry_id: str,
+    sector_number: int,
+    sector_time_ms: int | None,
+) -> str:
+    if sector_time_ms is None:
+        return "normal"
+    config = race_sector_config(race_id)
+    overall_best = best_sector_time(race_id, sector_number)
+    personal_best = best_sector_time(race_id, sector_number, entry_id)
+    if overall_best is not None and sector_time_ms <= overall_best:
+        return "purple"
+    if personal_best is not None and sector_time_ms <= personal_best:
+        return "green"
+    if personal_best is not None and sector_time_ms > personal_best + config["red_threshold_ms"]:
+        return "red"
+    return "normal"
+
+
+def sector_rows_for_lap(entry_id: str, lap: int | None) -> dict[int, sqlite3.Row]:
+    if lap is None:
+        return {}
+    rows = fetch_all(
+        "SELECT * FROM sector_crossings WHERE entry_id = ? AND lap = ? ORDER BY sector_number",
+        (entry_id, lap),
+    )
+    return {int(row["sector_number"]): row for row in rows}
+
+
+def latest_lap_summary(entry_id: str, before_lap: int | None = None) -> sqlite3.Row | None:
+    if before_lap is None:
+        return fetch_one(
+            """
+            SELECT * FROM lap_sector_summaries
+            WHERE entry_id = ? AND sector_status = 'complete'
+            ORDER BY lap DESC LIMIT 1
+            """,
+            (entry_id,),
+        )
+    return fetch_one(
+        """
+        SELECT * FROM lap_sector_summaries
+        WHERE entry_id = ? AND lap < ? AND sector_status = 'complete'
+        ORDER BY lap DESC LIMIT 1
+        """,
+        (entry_id, before_lap),
+    )
+
+
+def sector_times_from_summary(summary: sqlite3.Row | None) -> dict[int, dict[str, Any]]:
+    if not summary:
+        return {}
+    try:
+        sector_times = json.loads(summary["sector_times_json"])
+    except json.JSONDecodeError:
+        return {}
+    return {int(item["sector_number"]): item for item in sector_times}
+
+
+def build_sector_display(
+    race_id: str,
+    entry_id: str,
+    current_lap: int | None,
+    lap_progress: float | None,
+    mode: Literal["public", "engineer"],
+) -> dict[str, Any]:
+    sectors = sector_definitions_for_race(race_id)
+    current_sector = current_sector_number(sectors, lap_progress)
+    current_rows = sector_rows_for_lap(entry_id, current_lap)
+    previous_summary = latest_lap_summary(entry_id, current_lap)
+    previous_times = sector_times_from_summary(previous_summary)
+    display: list[dict[str, Any]] = []
+
+    for sector in sectors:
+        number = int(sector["sector_number"])
+        row = current_rows.get(number)
+        source = "current_lap"
+        state = "normal"
+        sector_time_ms = None
+
+        if row:
+            sector_time_ms = row["sector_time_ms"]
+            state = sector_state_for_time(race_id, entry_id, number, sector_time_ms)
+        elif current_sector == number:
+            state = "calculating"
+        elif mode == "public":
+            previous = previous_times.get(number)
+            if previous and previous.get("sector_time_ms") is not None:
+                sector_time_ms = previous["sector_time_ms"]
+                state = sector_state_for_time(race_id, entry_id, number, sector_time_ms)
+                source = "previous_lap"
+            else:
+                state = "not_available"
+                source = "previous_lap"
+        else:
+            state = "not_reached"
+
+        display.append(
+            {
+                "sector_number": number,
+                "display_value": sector_display_value(sector_time_ms, state),
+                "sector_time_ms": sector_time_ms,
+                "source": source,
+                "state": state,
+            }
+        )
+
+    return {"current_sector_number": current_sector, "sector_display": display}
+
+
+def build_lap_history(entry: sqlite3.Row, limit: int = 25) -> list[dict[str, Any]]:
+    summaries = fetch_all(
+        """
+        SELECT * FROM lap_sector_summaries
+        WHERE entry_id = ?
+        ORDER BY lap DESC LIMIT ?
+        """,
+        (entry["entry_id"], limit),
+    )
+    result: list[dict[str, Any]] = []
+    for summary in summaries:
+        sector_times = []
+        for item in json.loads(summary["sector_times_json"]):
+            sector_time_ms = item.get("sector_time_ms")
+            number = int(item["sector_number"])
+            sector_times.append(
+                {
+                    "sector_number": number,
+                    "display_value": sector_display_value(sector_time_ms, "normal"),
+                    "sector_time_ms": sector_time_ms,
+                    "state": sector_state_for_time(entry["race_id"], entry["entry_id"], number, sector_time_ms)
+                    if summary["sector_status"] == "complete"
+                    else "not_available",
+                }
+            )
+        result.append(
+            {
+                "lap": summary["lap"],
+                "driver_id": summary["driver_id"],
+                "driver_name": driver_display(entry, summary["driver_id"]),
+                "lap_time_ms": summary["lap_time_ms"],
+                "sector_status": summary["sector_status"],
+                "sector_times": sector_times,
+                "fuel_start_liters": summary["fuel_start_liters"],
+                "fuel_end_liters": summary["fuel_end_liters"],
+                "fuel_used_liters": summary["fuel_used_liters"],
+                "pit_lap": bool(summary["pit_lap"]),
+                "notes": summary["notes"],
+            }
+        )
+    return result
 
 
 def compute_standings(race_id: str) -> list[dict[str, Any]]:
@@ -659,6 +1232,7 @@ def compute_standings(race_id: str) -> list[dict[str, Any]]:
             else:
                 gap_to_ahead = f"+{(previous_progress - progress) * REFERENCE_LAP_SECONDS:.1f}s est"
 
+        sectors = build_sector_display(race_id, row["entry_id"], row["lap"], row["lap_progress"], "public")
         standings.append(
             {
                 "position": index,
@@ -680,6 +1254,8 @@ def compute_standings(race_id: str) -> list[dict[str, Any]]:
                 "penalty_seconds": row["penalty_seconds"],
                 "status": status,
                 "connection_status": connection_status(row if latest_present else None),
+                "current_sector_number": sectors["current_sector_number"],
+                "sector_display": sectors["sector_display"],
             }
         )
         previous_progress = progress
@@ -721,6 +1297,7 @@ def trackmap_for_race(race_id: str) -> dict[str, Any]:
             "bounds": None,
             "source_entry_id": None,
             "source_lap": None,
+            "sectors": sector_definitions_for_race(race_id),
             "calibration": [
                 {"entry_id": row["entry_id"], "lap": row["lap"], "points": len(json.loads(row["points_json"]))}
                 for row in buffers
@@ -750,7 +1327,7 @@ def trackmap_for_race(race_id: str) -> dict[str, Any]:
                 "connection_status": connection_status(row),
                 "x": normalized["x"],
                 "y": normalized["y"],
-                "progress": round(index / (len(points) - 1), 4) if len(points) > 1 else 0,
+                "progress": round(float(point.get("progress", index / (len(points) - 1))), 4) if len(points) > 1 else 0,
             }
         )
 
@@ -761,6 +1338,7 @@ def trackmap_for_race(race_id: str) -> dict[str, Any]:
         "bounds": bounds,
         "source_entry_id": reference["source_entry_id"],
         "source_lap": reference["source_lap"],
+        "sectors": sector_definitions_for_race(race_id),
         "calibration": [],
         "cars": cars,
     }
@@ -816,6 +1394,21 @@ def private_state_for_entry(entry_id: str) -> dict[str, Any]:
         "entry": row_to_entry(entry),
         "standing": own_standing,
         "trackmap": trackmap,
+        "sector_count": race_sector_config(entry["race_id"])["sector_count"],
+        "current_lap": {
+            "lap": latest_dict.get("lap"),
+            "driver_id": latest_dict.get("driver_id"),
+            "driver_name": driver_display(entry, latest_dict.get("driver_id")),
+            "lap_status": "running" if latest else "waiting",
+            **build_sector_display(
+                entry["race_id"],
+                entry_id,
+                latest_dict.get("lap"),
+                latest_dict.get("lap_progress"),
+                "engineer",
+            ),
+        },
+        "lap_history": build_lap_history(entry),
         "fuel_liters": latest_dict.get("fuel_liters"),
         "fuel_per_lap": fuel_per_lap,
         "estimated_laps_remaining": estimated_laps_remaining,
@@ -1009,8 +1602,8 @@ async def create_race(payload: RaceCreate, _: str = Depends(require_admin)) -> d
     execute(
         """
         INSERT INTO races (race_id, name, track_id, duration_minutes, start_time, event_type,
-                           drivers_per_team, classes_json, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           drivers_per_team, classes_json, sector_count, red_threshold_ms, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             payload.race_id,
@@ -1021,10 +1614,14 @@ async def create_race(payload: RaceCreate, _: str = Depends(require_admin)) -> d
             payload.event_type,
             payload.drivers_per_team,
             json.dumps(payload.classes),
+            max(1, int(payload.sector_count)),
+            max(0, int(payload.red_threshold_ms)),
             payload.status,
             now_iso(),
         ),
     )
+    with db() as conn:
+        ensure_sector_definitions(conn, payload.race_id)
     log_event(payload.race_id, f"Race created: {payload.name}")
     await hub.broadcast(payload.race_id)
     return row_to_race(fetch_one("SELECT * FROM races WHERE race_id = ?", (payload.race_id,)))
@@ -1054,6 +1651,9 @@ async def delete_race(race_id: str, _: str = Depends(require_admin)) -> dict[str
         conn.execute("DELETE FROM race_log WHERE race_id = ?", (race_id,))
         conn.execute("DELETE FROM track_references WHERE race_id = ?", (race_id,))
         conn.execute("DELETE FROM track_lap_buffers WHERE race_id = ?", (race_id,))
+        conn.execute("DELETE FROM sector_definitions WHERE race_id = ?", (race_id,))
+        conn.execute("DELETE FROM sector_crossings WHERE race_id = ?", (race_id,))
+        conn.execute("DELETE FROM lap_sector_summaries WHERE race_id = ?", (race_id,))
         conn.execute("DELETE FROM races WHERE race_id = ?", (race_id,))
     await hub.broadcast(race_id)
     return {"ok": True, "race_id": race_id}
@@ -1067,6 +1667,32 @@ async def update_race_status(race_id: str, payload: RaceStatusUpdate, _: str = D
     log_event(race_id, f"Race status changed to {payload.status}")
     await hub.broadcast(race_id)
     return {"ok": True, "status": payload.status}
+
+
+@app.patch("/api/race-control/races/{race_id}/sectors")
+async def update_sector_config(race_id: str, payload: SectorConfigUpdate, _: str = Depends(require_admin)) -> dict[str, Any]:
+    if not fetch_one("SELECT race_id FROM races WHERE race_id = ?", (race_id,)):
+        raise HTTPException(status_code=404, detail="Race not found")
+    sector_count = max(1, int(payload.sector_count))
+    red_threshold_ms = max(0, int(payload.red_threshold_ms))
+    with db() as conn:
+        conn.execute(
+            "UPDATE races SET sector_count = ?, red_threshold_ms = ? WHERE race_id = ?",
+            (sector_count, red_threshold_ms, race_id),
+        )
+        ensure_sector_definitions(conn, race_id)
+        conn.execute(
+            "INSERT INTO race_log (race_id, entry_id, level, message, created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                race_id,
+                None,
+                "info",
+                f"Sector config changed to {sector_count} sectors, red threshold {red_threshold_ms} ms",
+                now_iso(),
+            ),
+        )
+    await hub.broadcast(race_id)
+    return row_to_race(fetch_one("SELECT * FROM races WHERE race_id = ?", (race_id,)))
 
 
 @app.post("/api/race-control/races/{race_id}/entries")
@@ -1118,6 +1744,8 @@ async def delete_entry(entry_id: str, _: str = Depends(require_admin)) -> dict[s
         conn.execute("DELETE FROM collector_sessions WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM team_sessions WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM track_lap_buffers WHERE entry_id = ?", (entry_id,))
+        conn.execute("DELETE FROM sector_crossings WHERE entry_id = ?", (entry_id,))
+        conn.execute("DELETE FROM lap_sector_summaries WHERE entry_id = ?", (entry_id,))
         conn.execute("DELETE FROM entries WHERE entry_id = ?", (entry_id,))
         conn.execute(
             "INSERT INTO race_log (race_id, entry_id, level, message, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1312,6 +1940,7 @@ async def telemetry_ingest(payload: TelemetryIn, session: sqlite3.Row = Depends(
     )
     with db() as conn:
         update_pit_detection(conn, session, payload)
+        process_sector_timing(conn, session, payload, lap_progress, received_at)
         conn.execute(
             """
             INSERT INTO telemetry_packets (race_id, entry_id, driver_id, collector_id, timestamp, lap, lap_progress,

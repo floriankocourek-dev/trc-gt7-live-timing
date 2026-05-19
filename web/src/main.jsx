@@ -35,6 +35,15 @@ function fmtFixed(value, digits = 1, suffix = '') {
   return `${number.toFixed(digits)}${suffix}`;
 }
 
+function sectorCellClass(sector) {
+  return `sectorCell sector-${sector?.state || 'normal'}`;
+}
+
+function SectorCell({ sector }) {
+  if (!sector) return <span className="sectorCell sector-not-available">--</span>;
+  return <span className={sectorCellClass(sector)}>{sector.display_value || '--'}</span>;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -235,6 +244,8 @@ function TrackMap({ trackMap, focusEntryId }) {
 }
 
 function StandingsTable({ rows }) {
+  const sectorCount = rows.reduce((max, row) => Math.max(max, row.sector_display?.length || 0), 0);
+  const sectorNumbers = Array.from({ length: sectorCount }, (_, index) => index + 1);
   return (
     <div className="tableFrame">
       <table>
@@ -249,6 +260,7 @@ function StandingsTable({ rows }) {
             <th>Laps</th>
             <th>Gap</th>
             <th>Int</th>
+            {sectorNumbers.map((number) => <th key={`s${number}`}>S{number}</th>)}
             <th>Last</th>
             <th>Best</th>
             <th>Pit</th>
@@ -269,6 +281,11 @@ function StandingsTable({ rows }) {
               <td>{row.laps}</td>
               <td>{fmt(row.gap_to_leader)}</td>
               <td>{fmt(row.gap_to_ahead)}</td>
+              {sectorNumbers.map((number) => (
+                <td key={`${row.entry_id}-s${number}`}>
+                  <SectorCell sector={row.sector_display?.find((sector) => sector.sector_number === number)} />
+                </td>
+              ))}
               <td>{formatMs(row.last_lap_ms)}</td>
               <td>{formatMs(row.best_lap_ms)}</td>
               <td>{row.pit_stops}</td>
@@ -279,7 +296,7 @@ function StandingsTable({ rows }) {
           ))}
           {!rows.length && (
             <tr>
-              <td colSpan="15" className="empty">No standings yet.</td>
+              <td colSpan={15 + sectorCount} className="empty">No standings yet.</td>
             </tr>
           )}
         </tbody>
@@ -418,6 +435,8 @@ function EngineerPanel({ state }) {
 
       <TrackMap trackMap={state.trackmap} focusEntryId={entry.entry_id} />
 
+      <EngineerLapTable state={state} />
+
       {state.gt7_telemetry && (
         <>
           <h2>GT7 Telemetry</h2>
@@ -429,6 +448,94 @@ function EngineerPanel({ state }) {
         </>
       )}
     </div>
+  );
+}
+
+function EngineerLapTable({ state }) {
+  const current = state.current_lap;
+  const history = state.lap_history || [];
+  const sectorCount = Math.max(
+    state.sector_count || 0,
+    current?.sector_display?.length || 0,
+    ...history.map((lap) => lap.sector_times?.length || 0),
+  );
+  const sectorNumbers = Array.from({ length: sectorCount }, (_, index) => index + 1);
+  const rows = [
+    current && {
+      key: 'current',
+      lap: current.lap,
+      driver_name: current.driver_name,
+      lap_time_ms: null,
+      lap_label: 'running',
+      sectors: current.sector_display,
+      fuel_start_liters: null,
+      fuel_end_liters: null,
+      fuel_used_liters: null,
+      pit_lap: false,
+      notes: '',
+      live: true,
+    },
+    ...history.map((lap) => ({
+      key: `lap-${lap.lap}`,
+      lap: lap.lap,
+      driver_name: lap.driver_name,
+      lap_time_ms: lap.lap_time_ms,
+      lap_label: formatMs(lap.lap_time_ms),
+      sectors: lap.sector_times,
+      fuel_start_liters: lap.fuel_start_liters,
+      fuel_end_liters: lap.fuel_end_liters,
+      fuel_used_liters: lap.fuel_used_liters,
+      pit_lap: lap.pit_lap,
+      notes: lap.notes || (lap.sector_status === 'incomplete' ? 'Incomplete sectors' : ''),
+      live: false,
+    })),
+  ].filter(Boolean);
+
+  return (
+    <>
+      <h2>Lap & Sector History</h2>
+      <div className="tableFrame sectorHistory">
+        <table>
+          <thead>
+            <tr>
+              <th>Lap</th>
+              <th>Driver</th>
+              {sectorNumbers.map((number) => <th key={`engineer-s${number}`}>S{number}</th>)}
+              <th>Lap Time</th>
+              <th>Fuel Start</th>
+              <th>Fuel End</th>
+              <th>Fuel Used</th>
+              <th>Pit Lap</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key} className={row.live ? 'liveLapRow' : ''}>
+                <td>{fmt(row.lap)}</td>
+                <td>{fmt(row.driver_name)}</td>
+                {sectorNumbers.map((number) => (
+                  <td key={`${row.key}-s${number}`}>
+                    <SectorCell sector={row.sectors?.find((sector) => sector.sector_number === number)} />
+                  </td>
+                ))}
+                <td>{row.lap_label}</td>
+                <td>{fmtFixed(row.fuel_start_liters, 2, ' L')}</td>
+                <td>{fmtFixed(row.fuel_end_liters, 2, ' L')}</td>
+                <td>{fmtFixed(row.fuel_used_liters, 2, ' L')}</td>
+                <td>{row.pit_lap ? 'yes' : '-'}</td>
+                <td>{fmt(row.notes)}</td>
+              </tr>
+            ))}
+            {!rows.length && (
+              <tr>
+                <td colSpan={7 + sectorCount} className="empty">No sector history yet.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }
 
@@ -549,13 +656,20 @@ function RaceControl() {
       </div>
 
       {raceDetail && (
-        <div className="headlineBand compact">
-          <div>
-            <div className="eyebrow">{raceDetail.race.race_id}</div>
-            <h2>{raceDetail.race.name}</h2>
-            <p>{raceDetail.race.event_type} - {raceDetail.race.duration_minutes} min - {raceDetail.race.status}</p>
+        <div className="raceDetailStack">
+          <div className="headlineBand compact">
+            <div>
+              <div className="eyebrow">{raceDetail.race.race_id}</div>
+              <h2>{raceDetail.race.name}</h2>
+              <p>
+                {raceDetail.race.event_type} - {raceDetail.race.duration_minutes} min - {raceDetail.race.status}
+                {' | '}Sectors: {raceDetail.race.sector_count}
+                {' | '}Red threshold: {raceDetail.race.red_threshold_ms} ms
+              </p>
+            </div>
+            <RaceStatusButtons token={token} raceId={selectedRace} onDone={refresh} />
           </div>
-          <RaceStatusButtons token={token} raceId={selectedRace} onDone={refresh} />
+          <SectorSettings race={raceDetail.race} token={token} onDone={refresh} onMessage={setMessage} />
         </div>
       )}
 
@@ -663,6 +777,8 @@ function RaceForm({ token, onDone }) {
     event_type: 'team',
     drivers_per_team: '',
     classes: '',
+    sector_count: '',
+    red_threshold_ms: '',
   });
 
   async function submit(event) {
@@ -675,6 +791,8 @@ function RaceForm({ token, onDone }) {
         duration_minutes: Number(form.duration_minutes),
         drivers_per_team: Number(form.drivers_per_team),
         classes: form.classes.split(',').map((x) => x.trim()).filter(Boolean),
+        sector_count: Number(form.sector_count || 3),
+        red_threshold_ms: Number(form.red_threshold_ms || 500),
       }),
     });
     onDone(data);
@@ -690,6 +808,8 @@ function RaceForm({ token, onDone }) {
       <label>Event Type<select value={form.event_type} onChange={(e) => setForm({ ...form, event_type: e.target.value })}><option value="solo">Solo</option><option value="team">Team</option></select></label>
       <label>Drivers / Team<input type="number" value={form.drivers_per_team} placeholder="for example: 2" onChange={(e) => setForm({ ...form, drivers_per_team: e.target.value })} /></label>
       <label>Classes<input value={form.classes} placeholder="for example: GT3 Pro, GT3 Am" onChange={(e) => setForm({ ...form, classes: e.target.value })} /></label>
+      <label>How Many Sectors?<input type="number" min="1" value={form.sector_count} placeholder="for example: 4" onChange={(e) => setForm({ ...form, sector_count: e.target.value })} /></label>
+      <label>Red Threshold MS<input type="number" min="0" value={form.red_threshold_ms} placeholder="for example: 500" onChange={(e) => setForm({ ...form, red_threshold_ms: e.target.value })} /></label>
       <button type="submit">Create Race</button>
     </form>
   );
@@ -746,6 +866,43 @@ function RaceStatusButtons({ token, raceId, onDone }) {
     <div className="buttonRow">
       <button onClick={() => setStatus('running')}><Timer size={18} /> Start</button>
       <button onClick={() => setStatus('finished')} className="secondary">Stop</button>
+    </div>
+  );
+}
+
+function SectorSettings({ race, token, onDone, onMessage }) {
+  const [sectorCount, setSectorCount] = useState(race.sector_count || 3);
+  const [redThreshold, setRedThreshold] = useState(race.red_threshold_ms || 500);
+
+  useEffect(() => {
+    setSectorCount(race.sector_count || 3);
+    setRedThreshold(race.red_threshold_ms || 500);
+  }, [race.race_id, race.sector_count, race.red_threshold_ms]);
+
+  async function save() {
+    await api(`/api/race-control/races/${race.race_id}/sectors`, {
+      token,
+      method: 'PATCH',
+      body: JSON.stringify({
+        sector_count: Number(sectorCount || 3),
+        red_threshold_ms: Number(redThreshold || 500),
+      }),
+    });
+    onMessage(`Sector config updated: ${sectorCount} sectors, red threshold ${redThreshold} ms`);
+    onDone();
+  }
+
+  return (
+    <div className="sectorSettings">
+      <label>
+        How many sectors?
+        <input type="number" min="1" value={sectorCount} onChange={(e) => setSectorCount(e.target.value)} />
+      </label>
+      <label>
+        Red threshold ms
+        <input type="number" min="0" value={redThreshold} onChange={(e) => setRedThreshold(e.target.value)} />
+      </label>
+      <button className="secondary" onClick={save}>Update Sectors</button>
     </div>
   );
 }
